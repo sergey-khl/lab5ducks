@@ -45,7 +45,7 @@ class LaneFollowNode(DTROS):
         
 
         # Initialize distance subscriber and velocity publisher
-        self.sub_dist = rospy.Subscriber("/" + self.veh + "/duckiebot_distance_node/distance", Point, self.cb_dist, queue_size=1)
+        #self.sub_ml = rospy.Subscriber("/" + self.veh + "/augmented_reality_node/position", Point, self.cb_april, queue_size=1)
         self.vel_pub = rospy.Publisher("/" + self.veh + "/car_cmd_switch_node/cmd",
                                        Twist2DStamped,
                                        queue_size=1)
@@ -55,11 +55,12 @@ class LaneFollowNode(DTROS):
 
         # Initialize driving behaviour variables
         self.delay = 0
-        self.stopping = False
+        # self.stopping = False
         self.turning = False
         self.update = False
         self.following = -1
-        self.notSeen = 0
+        # self.notSeen = 0
+        self.digit_delay = 0
 
         self.velocity = 0.3
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
@@ -87,6 +88,16 @@ class LaneFollowNode(DTROS):
         led_service = f'/{self.veh}/led_controller_node/led_pattern'
         rospy.wait_for_service(led_service)
         self.led_pattern = rospy.ServiceProxy(led_service, ChangePattern)
+
+        # Initialize get april tag service
+        april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
+        rospy.wait_for_service(april_service)
+        self.get_april = rospy.ServiceProxy(april_service, ChangePattern)
+
+        # Initialize get digit service
+        digit_service = f'/ml_node/get_digit'
+        rospy.wait_for_service(digit_service)
+        self.get_digit = rospy.ServiceProxy(digit_service, ChangePattern)
 
         # Initialize shutdown hook
         rospy.on_shutdown(self.hook)
@@ -141,17 +152,18 @@ class LaneFollowNode(DTROS):
                 self.proportional_lane_following = cx - int(crop_width / 2) + self.offset
 
                 # if the error is within a threshold, move straight, otherwise turn right or left
+                # TODO: make this using odometry
                 if self.update:
                     print('updating   ', self.proportional_lane_following)
                     self.turning = True
                     if (self.proportional_lane_following > 200):
                         self.change_led_lights("2")
                         print('default right')
-                        self.turn(-7, 2, 1.8)
+                        self.turn(-7, self.velocity, 2, 1.8)
                     else:
                         self.change_led_lights("0")
                         print('default straight')
-                        self.turn(0, 0.7, 2)
+                        self.turn(0, self.velocity, 0.7, 2)
 
                     self.change_led_lights("0")
                     self.update = False
@@ -182,43 +194,34 @@ class LaneFollowNode(DTROS):
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
                  # If the robot has reached the red line, it stops and turns
-                 
+                 # TODO: use odometry for this
                 if self.delay <= 0 and cy > 140:
-                    
-                    self.delay = 2
                     self.turning = True
                     print('stop, red line')
                     # Changes the LED lights according to the direction
                     # it's going to turn (straight, left, right, default)
                     self.change_led_lights(str(self.following))
-
-                    # Publishes velocity messages to stop the robot
-                    rate = rospy.Rate(1)
-                    self.twist.v = 0
-                    self.twist.omega = 0
-                    for i in range(8):
-                        self.vel_pub.publish(self.twist)
-                    rate.sleep()
+                    self.turn(0, 0, 1, 2)
                     
                     
                     # The robot turns depending on the direction it was following
                     if (self.following == 0):
                         print('going straight')
-                        self.turn(0, 0.3, 2)
+                        self.turn(0, self.velocity, 0.3, 2)
                         # Changes LED lights to default
                         self.change_led_lights("0")
                     elif (self.following == 1):
                         print('going left')
-                        self.turn(3, 0.5, 1.8)
+                        self.turn(3, self.velocity, 0.5, 1.8)
                         # Changes LED lights to default
                         self.change_led_lights("0")
                     elif (self.following == 2):
                         print('going right')
-                        self.turn(-4, 0.7, 1.8)
+                        self.turn(-4, self.velocity, 0.7, 1.8)
                         # Changes LED lights to default
                         self.change_led_lights("0")
                     else:
-                        self.turn(0, 2, 2)
+                        self.turn(0, self.velocity, 2, 2)
                         self.update = True
 
                     
@@ -237,14 +240,14 @@ class LaneFollowNode(DTROS):
             self.pub.publish(rect_img_msg)
 
 
-    def turn(self, omega, hz, delay):
+    def turn(self, v, omega, hz, delay):
         # Set the rate at which to publish the twist messages
         rate = rospy.Rate(hz)
         # Set the delay before the next movement
         self.delay = delay
 
         # Set the linear velocity of the robot
-        self.twist.v = self.velocity
+        self.twist.v = v
 
         # Set the angular velocity of the robot
         self.twist.omega = omega
@@ -255,96 +258,68 @@ class LaneFollowNode(DTROS):
 
         # Sleep for the desired time to allow the robot to turn
         rate.sleep()
-        
 
-    def cb_dist(self, msg):
-        #print(f'x offest {msg.x}')
-        
-        # If the distance values received are all 0, set following to -1
-        if not self.turning:
-            if msg.x == msg.y and msg.y == msg.z and msg.z == 0:
-                # do ya own thang
-                if (self.notSeen <= 0):
-                    self.following = -1
-                    self.stopping = False
-
-                    
-            else:
-                self.notSeen = 0.3
-                if (msg.x < -0.1):
-                    # go left
-                    self.following = 1
-                elif (msg.x > 0.1):
-                    # go right
-                    self.following = 2
-                else:
-                    # go straight
-                    self.following = 0
-                    self.proportional_collision = msg.z
-
-                # If the z-value is less than 0.5, set stopping to True
-                if (msg.z < 0.5):
-                    self.stopping = True
-                else:
-                    self.stopping = False
                 
 
     def drive(self):
         # decrease delay by elapsed time
         self.delay -= (rospy.get_time() - self.last_time)
-        self.notSeen -= (rospy.get_time() - self.last_time)
-        
-        
+        # self.notSeen -= (rospy.get_time() - self.last_time)
+        self.digit_delay -= (rospy.get_time() - self.last_time)
+
+        if self.digit_delay <= 0:
+            # rate at which we try to find numbers
+            bounding_box = self.check_digit("checking digit")
+            print(bounding_box)
+
+            detected = self.check_april_tag("checking april")
+            print(detected)
+
+            self.check_detection = 1
 
         # check if the robot is turning or stopping
         if not self.turning:
-            if self.stopping:
-                print('stopping behind bot')
-                # stop robot
-                self.twist.v = 0
-                self.twist.omega = 0
-            else:
-                try:
-                    print(self.following)
-                    # Lane Following P Term
-                    P_lane_following = -self.proportional_lane_following * self.P_gain_lane_following
+            try:
+                #print(self.following)
+                # Lane Following P Term
+                P_lane_following = -self.proportional_lane_following * self.P_gain_lane_following
+                
+                # Lane Following D Term
+                d_error_lane_following = (self.proportional_lane_following - self.last_error_lane_following) / (rospy.get_time() - self.last_time)
+                D_lane_following = d_error_lane_following * self.D_gain_lane_following
+
+                self.last_error_lane_following = self.proportional_lane_following
+
+                # if self.proportional_collision is not None:
+                #     # Collision P Term
+                #     P_collision = self.proportional_collision * self.P_gain_collision
                     
-                    # Lane Following D Term
-                    d_error_lane_following = (self.proportional_lane_following - self.last_error_lane_following) / (rospy.get_time() - self.last_time)
-                    D_lane_following = d_error_lane_following * self.D_gain_lane_following
+                #     # Collision D Term
+                #     d_error_collision = (self.proportional_collision - self.last_error_collision) / (rospy.get_time() - self.last_time)
+                #     D_collision = d_error_collision * self.D_gain_collision
 
-                    self.last_error_lane_following = self.proportional_lane_following
-
-                    # if self.proportional_collision is not None:
-                    #     # Collision P Term
-                    #     P_collision = self.proportional_collision * self.P_gain_collision
-                        
-                    #     # Collision D Term
-                    #     d_error_collision = (self.proportional_collision - self.last_error_collision) / (rospy.get_time() - self.last_time)
-                    #     D_collision = d_error_collision * self.D_gain_collision
-
-                    #     self.last_error_collision = self.proportional_collision
+                #     self.last_error_collision = self.proportional_collision
 
 
-                    # # set linear and angular velocity
-                    # if PID_COLLISION:
-                    #     self.twist.v = P_collision + D_collision
+                # # set linear and angular velocity
+                # if PID_COLLISION:
+                #     self.twist.v = P_collision + D_collision
 
-                    # else: 
-                    #     print(f'PID lin vel: {P_collision + D_collision}')
-                    self.twist.v = self.velocity
+                # else: 
+                #     print(f'PID lin vel: {P_collision + D_collision}')
+                self.twist.v = self.velocity
 
 
-                    self.twist.omega = P_lane_following + D_lane_following
+                self.twist.omega = P_lane_following + D_lane_following
 
-                    if DEBUG:
-                        self.loginfo(self.proportional_lane_following, P_lane_following, D_lane_following, self.twist.omega, self.twist.v)
+                if DEBUG:
+                    self.loginfo(self.proportional_lane_following, P_lane_following, D_lane_following, self.twist.omega, self.twist.v)
 
-                except:
-                    # robot is lost and doesn't know where to go
-                    print('drive: idk where I am')
-                    self.twist.v = self.velocity
-                    self.twist.omega = 0
+            except:
+                # robot is lost and doesn't know where to go
+                print('drive: idk where I am')
+                self.twist.v = self.velocity
+                self.twist.omega = 0
 
 
             # publish twist message
@@ -356,12 +331,18 @@ class LaneFollowNode(DTROS):
 
     def hook(self):
         print("SHUTTING DOWN")
-        self.twist.v = 0
-        self.twist.omega = 0
-        self.vel_pub.publish(self.twist)
+        self.turn(0, 0, 0, 0)
 
-        for i in range(8):
-            self.vel_pub.publish(self.twist)
+    def check_digit(self, msg: str):
+        # stop for a sec
+        msg = String()
+        msg.data = msg
+        self.get_digit(msg)
+
+    def check_april_tag(self, bounding_box: str):
+        msg = String()
+        msg.data = bounding_box
+        self.get_april(msg)
 
 
     def change_led_lights(self, dir: str):

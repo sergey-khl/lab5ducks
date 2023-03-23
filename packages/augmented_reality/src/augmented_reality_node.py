@@ -51,7 +51,7 @@ class AugmentedRealityNode(DTROS):
 
         # setup publisher
         self.undistorted = None
-        self.undistorted_color = None
+        #self.undistorted_color = None
     
         # setup subscriber
         self.sub_img = rospy.Subscriber(f'/{self.veh}/camera_node/image/compressed', CompressedImage, self.get_img, queue_size = 1)
@@ -62,14 +62,23 @@ class AugmentedRealityNode(DTROS):
         #self.pub_img_color = rospy.Publisher(f'/{self.veh}/{node_name}/color/compressed', CompressedImage, queue_size=1)
         self.pub_loc = rospy.Publisher(f'/{self.veh}/teleport', Pose, queue_size=1)
 
-        # -- Proxy -- 
-        led_service = f'/{self.veh}/led_controller_node/led_pattern'
-        rospy.wait_for_service(led_service)
-        self.led_pattern = rospy.ServiceProxy(led_service, ChangePattern)
+        # Services
+        self.srv_get_april = rospy.Service(
+            "~get_april_detect", ChangePattern, self.srvGetApril
+        )
+
 
         self._tf_broadcaster = TransformBroadcaster()
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer)
+
+        self.wizard(Point(*[0.32, 0.3, 0]), Quaternion(*[0, 0, 0, 1]))
+
+    def srvGetApril(self, req):
+        print(req)
+        detected = self.detect_april()
+
+        return
 
 
     def get_img(self, msg):
@@ -141,16 +150,28 @@ class AugmentedRealityNode(DTROS):
                 )
             )
 
-            if (r.tag_id == 93 or r.tag_id == 94 or r.tag_id == 200 or r.tag_id == 201):
-                self.log('UOFA')
-                self.change_led_lights("green")
-            elif (r.tag_id == 62 or r.tag_id == 153 or r.tag_id == 133 or r.tag_id == 56):
-                self.log('INTERSECTION')
-                self.change_led_lights("blue")
-            elif (r.tag_id == 162 or r.tag_id == 169):
-                self.log('STOP')
-                self.change_led_lights("red")
 
+            trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/at_{r.tag_id}_estimate", rospy.Time())
+
+            print(f"apriltag ID: {r.tag_id}, \nlocation: {trans.transform.translation.x}, {trans.transform.translation.y}, {0.5}")
+
+            new_img = CompressedImage()
+            new_img.data = cv2.imencode('.jpg', self.undistorted)[1].tobytes()
+            self.pub_img.publish(new_img)
+
+            # if (r.tag_id == 93 or r.tag_id == 94 or r.tag_id == 200 or r.tag_id == 201):
+            #     self.log('UOFA')
+            #     self.change_led_lights("green")
+            # elif (r.tag_id == 62 or r.tag_id == 153 or r.tag_id == 133 or r.tag_id == 56):
+            #     self.log('INTERSECTION')
+            #     self.change_led_lights("blue")
+            # elif (r.tag_id == 162 or r.tag_id == 169):
+            #     self.log('STOP')
+            #     self.change_led_lights("red")
+            
+
+
+            # may not need
 
             # find transform from april tag to wheelbase in worldframe
             # https://github.com/ros/geometry2/blob/noetic-devel/tf2_ros/src/tf2_ros/buffer.py
@@ -169,63 +190,48 @@ class AugmentedRealityNode(DTROS):
                 )
             )
 
+
             trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/robo_estimate", rospy.Time())
 
+            
+
             self.wizard(Point(*[trans.transform.translation.x, trans.transform.translation.y, 0]), trans.transform.rotation)
+            return True
         except Exception as e:
             print(e)
             self.change_led_lights("white")
+            return False
 
     def wizard(self, tran, rot):
         pose = Pose(tran, rot)
         self.pub_loc.publish(pose)
 
-    def run(self):
-        rate = rospy.Rate(1)
-        self.change_led_lights("white")
+    # def run(self):
+    #     rate = rospy.Rate(1)
+    #     self.change_led_lights("white")
 
 
-        while not rospy.is_shutdown():
+    #     while not rospy.is_shutdown():
             
-            if self.undistorted is not None:
+    #         if self.undistorted is not None:
                 
-                self.detect_april()
-                new_img = CompressedImage()
-                new_img.data = cv2.imencode('.jpg', self.undistorted)[1].tobytes()
-                self.pub_img.publish(new_img)
-
-                # new_img_c = CompressedImage()
-                # new_img_c.data = cv2.imencode('.jpg', self.undistorted_color)[1].tobytes()
-                # self.pub_img_color.publish(new_img_c)
+    #             self.detect_april()
                 
-                rate.sleep()
-                # self._tf_listener.waitForTransform(f"{self.veh}/base", f"{self.veh}/at_153_static", rospy.Duration(4.0))
-                # trans = self._tf_listener.lookupTransform(f"{self.veh}/base", f"{self.veh}/at_153_static", rospy.Time())
-                # print(trans)
-            else:
 
-                # init location
-                self.wizard(Point(*[0.32, 0.3, 0]), Quaternion(*[0, 0, 0, 1]))
-                self.change_led_lights("white")
+    #             # new_img_c = CompressedImage()
+    #             # new_img_c.data = cv2.imencode('.jpg', self.undistorted_color)[1].tobytes()
+    #             # self.pub_img_color.publish(new_img_c)
+                
+    #             rate.sleep()
+    #             # self._tf_listener.waitForTransform(f"{self.veh}/base", f"{self.veh}/at_153_static", rospy.Duration(4.0))
+    #             # trans = self._tf_listener.lookupTransform(f"{self.veh}/base", f"{self.veh}/at_153_static", rospy.Time())
+    #             # print(trans)
+    #         else:
 
-    def change_led_lights(self, color: str):
-        '''
-        Sends msg to service server
-        Colors:
-            "off": [0,0,0],
-            "white": [1,1,1],
-            "green": [0,1,0],
-            "red": [1,0,0],
-            "blue": [0,0,1],
-            "yellow": [1,0.8,0],
-            "purple": [1,0,1],
-            "cyan": [0,1,1],
-            "pink": [1,0,0.5],
-        '''
-        msg = String()
-        msg.data = color
-        self.led_pattern(msg)
-            
+    #             # init location
+                
+    #             # self.change_led_lights("white")
+
 
     def readYamlFile(self,fname):
         """
@@ -247,11 +253,5 @@ class AugmentedRealityNode(DTROS):
 if __name__ == '__main__':
     # create the node
     node = AugmentedRealityNode(node_name='augmented_reality_node')
-    try:
-        node.run()
-    except rospy.ROSInterruptException:
-        pass
-    # run node
-    #node.run()
-    # keep spinning
-    #rospy.spin()
+
+    rospy.spin()
