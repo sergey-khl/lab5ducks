@@ -9,8 +9,9 @@ import cv2
 import numpy as np
 from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped
 from geometry_msgs.msg import Point
-from duckietown_msgs.msg import LEDPattern
+from lane_follow.srv import img
 from duckietown_msgs.srv import ChangePattern
+import yaml
 
 # Define the HSV color range for road and stop mask
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
@@ -50,8 +51,20 @@ class LaneFollowNode(DTROS):
                                        Twist2DStamped,
                                        queue_size=1)
         
+        self.calibration_file = f'/data/config/calibrations/camera_intrinsic/default.yaml'
+ 
+        self.calibration = self.readYamlFile(self.calibration_file)
+
+        self.img_width = self.calibration['image_width']
+        self.img_height = self.calibration['image_height']
+        self.cam_matrix = np.array(self.calibration['camera_matrix']['data']).reshape((self.calibration['camera_matrix']['rows'], self.calibration['camera_matrix']['cols']))
+        self.distort_coeff = np.array(self.calibration['distortion_coefficients']['data']).reshape((self.calibration['distortion_coefficients']['rows'], self.calibration['distortion_coefficients']['cols']))
+
+        self.new_cam_matrix, self.roi = cv2.getOptimalNewCameraMatrix(self.cam_matrix, self.distort_coeff, (self.img_width, self.img_height), 1, (self.img_width, self.img_height))
+        
         # Initialize TurboJPEG decoder
         self.jpeg = TurboJPEG()
+        self.undistorted = None
 
         # Initialize driving behaviour variables
         self.delay = 0
@@ -92,12 +105,12 @@ class LaneFollowNode(DTROS):
         # Initialize get april tag service
         april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
         rospy.wait_for_service(april_service)
-        self.get_april = rospy.ServiceProxy(april_service, ChangePattern)
+        self.get_april = rospy.ServiceProxy(april_service, img)
 
         # Initialize get digit service
-        digit_service = f'/ml_node/get_digit'
-        rospy.wait_for_service(digit_service)
-        self.get_digit = rospy.ServiceProxy(digit_service, ChangePattern)
+        #digit_service = f'/detect_digit_node/detect_digit'
+        #rospy.wait_for_service(digit_service)
+        #self.get_digit = rospy.ServiceProxy(digit_service, ChangePattern)
 
         # Initialize shutdown hook
         rospy.on_shutdown(self.hook)
@@ -106,8 +119,18 @@ class LaneFollowNode(DTROS):
     def callback(self, msg):
         # decode the received message to an image
         img = self.jpeg.decode(msg.data)
+        print('got img')
         crop = img[300:-1, :, :]
         crop_width = crop.shape[1]
+        
+        img2 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        
+        # https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
+        undistorted = cv2.undistort(img2, self.cam_matrix, self.distort_coeff, None, self.new_cam_matrix)
+        x, y, w, h = self.roi
+        undistorted = undistorted[y:y+h, x:x+w]
+        self.undistorted = CompressedImage(format="jpeg", data=cv2.imencode('.jpg', undistorted)[1].tobytes())
 
         # convert the cropped image to HSV color space
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
@@ -209,17 +232,17 @@ class LaneFollowNode(DTROS):
                         print('going straight')
                         self.turn(0, self.velocity, 0.3, 2)
                         # Changes LED lights to default
-                        self.change_led_lights("0")
+                        #self.change_led_lights("0")
                     elif (self.following == 1):
                         print('going left')
                         self.turn(3, self.velocity, 0.5, 1.8)
                         # Changes LED lights to default
-                        self.change_led_lights("0")
+                        #self.change_led_lights("0")
                     elif (self.following == 2):
                         print('going right')
                         self.turn(-4, self.velocity, 0.7, 1.8)
                         # Changes LED lights to default
-                        self.change_led_lights("0")
+                        #self.change_led_lights("0")
                     else:
                         self.turn(0, self.velocity, 2, 2)
                         self.update = True
@@ -267,18 +290,19 @@ class LaneFollowNode(DTROS):
         # self.notSeen -= (rospy.get_time() - self.last_time)
         self.digit_delay -= (rospy.get_time() - self.last_time)
 
-        if self.digit_delay <= 0:
+        if self.digit_delay <= 0 and self.undistorted is not None:
+            print('trying to detect')
             # rate at which we try to find numbers
-            bounding_box = self.check_digit("checking digit")
-            print(bounding_box)
+            #bounding_box = self.check_digit("checking digit")
+            #print(bounding_box)
 
-            detected = self.check_april_tag("checking april")
+            detected = self.check_april_tag()
             print(detected)
 
-            self.check_detection = 1
+            self.digit_delay = 1
 
         # check if the robot is turning or stopping
-        if not self.turning:
+        if not self.turning and self.undistorted is not None:
             try:
                 #print(self.following)
                 # Lane Following P Term
@@ -331,7 +355,21 @@ class LaneFollowNode(DTROS):
 
     def hook(self):
         print("SHUTTING DOWN")
-        self.turn(0, 0, 0, 0)
+        # have 1 delay to avoid 0 division error
+        rate = rospy.Rate(10)
+
+        # Set the linear velocity of the robot
+        self.twist.v = 0
+
+        # Set the angular velocity of the robot
+        self.twist.omega = 0
+
+        # Publish the twist message multiple times to ensure the robot turns
+        for i in range(20):
+            self.vel_pub.publish(self.twist)
+
+            # Sleep for the desired time to allow the robot to die
+            rate.sleep()
 
     def check_digit(self, msg: str):
         # stop for a sec
@@ -339,10 +377,8 @@ class LaneFollowNode(DTROS):
         msg.data = msg
         self.get_digit(msg)
 
-    def check_april_tag(self, bounding_box: str):
-        msg = String()
-        msg.data = bounding_box
-        self.get_april(msg)
+    def check_april_tag(self):
+        self.get_april(self.undistorted)
 
 
     def change_led_lights(self, dir: str):
@@ -363,12 +399,28 @@ class LaneFollowNode(DTROS):
         msg = String()
         msg.data = dir
         self.led_pattern(msg)
+        
+    def readYamlFile(self,fname):
+        """
+        Reads the YAML file in the path specified by 'fname'.
+        E.G. :
+            the calibration file is located in : `/data/config/calibrations/filename/DUCKIEBOT_NAME.yaml`
+        """
+        with open(fname, 'r') as in_file:
+            try:
+                yaml_dict = yaml.load(in_file)
+                return yaml_dict
+            except yaml.YAMLError as exc:
+                self.log("YAML syntax error. File: %s fname. Exc: %s"
+                        %(fname, exc), type='fatal')
+                rospy.signal_shutdown()
+                return
 
 
 if __name__ == "__main__":
     node = LaneFollowNode("lanefollow_node")
     rate = rospy.Rate(8)  # 8hz
-    node.change_led_lights("0")
+    #node.change_led_lights("0")
     while not rospy.is_shutdown():
         node.drive()
         rate.sleep()

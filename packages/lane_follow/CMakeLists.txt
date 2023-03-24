@@ -6,15 +6,31 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   nav_msgs
   std_msgs
-  # duckietown_msgs # Every duckietown packages should use this.
+  message_generation
+  duckietown_msgs # Every duckietown packages should use this.
 )
 
-add_dependencies(${catkin_EXPORTED_TARGETS})
+
+add_service_files(
+  FILES
+  img.srv
+)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+  duckietown_msgs
+)
 
 catkin_package(
    CATKIN_DEPENDS
    message_runtime
+   duckietown_msgs
 )
+
+add_dependencies(${catkin_EXPORTED_TARGETS})
+
+
 
 include_directories(
   ${catkin_INCLUDE_DIRS}

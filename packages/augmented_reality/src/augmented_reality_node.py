@@ -13,6 +13,7 @@ from geometry_msgs.msg import Quaternion, Pose, Point, TransformStamped, Vector3
 from duckietown_msgs.msg import LEDPattern
 from duckietown_msgs.srv import ChangePattern
 import yaml
+from lane_follow.srv import img
 from dt_apriltags import Detector
 
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
@@ -64,7 +65,7 @@ class AugmentedRealityNode(DTROS):
 
         # Services
         self.srv_get_april = rospy.Service(
-            "~get_april_detect", ChangePattern, self.srvGetApril
+            "~get_april_detect", img, self.srvGetApril
         )
 
 
@@ -83,12 +84,13 @@ class AugmentedRealityNode(DTROS):
 
     def get_img(self, msg):
         img = np.frombuffer(msg.data, np.uint8)
-        img2 = cv2.imdecode(img, 0)     
+        img2 = cv2.imdecode(img, 0)    
 
         # https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
         undistorted = cv2.undistort(img2, self.cam_matrix, self.distort_coeff, None, self.new_cam_matrix)
         x, y, w, h = self.roi
         self.undistorted = undistorted[y:y+h, x:x+w]
+
         
 
     def get_img_color(self, msg):
@@ -182,8 +184,7 @@ class AugmentedRealityNode(DTROS):
             odom.header.stamp = rospy.Time.now()  # Ideally, should be encoder time
             odom.header.frame_id = f"{self.veh}/at_{r.tag_id}_static"
 
-            self._tf_broadcaster.sendTransform(
-                TransformStamped(
+            self._tf_broadcaster.sendTransform(TransformStamped(
                     header=odom.header,
                     child_frame_id=f"{self.veh}/robo_estimate",
                     transform=trans.transform,
