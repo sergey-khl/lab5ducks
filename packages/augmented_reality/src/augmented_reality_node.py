@@ -8,8 +8,9 @@ import numpy as np
 from duckietown.dtros import DTROS, NodeType
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Quaternion, Pose, Point, TransformStamped, Vector3, Transforms
-from lane_follow.srv import img
+from turbojpeg import TurboJPEG
+from geometry_msgs.msg import Quaternion, Pose, Point, TransformStamped, Vector3, Transform
+from lane_follow.srv import img, imgResponse
 from dt_apriltags import Detector
 
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
@@ -35,6 +36,8 @@ class AugmentedRealityNode(DTROS):
 
 
         # setup publisher
+        # Initialize TurboJPEG decoder
+        self.jpeg = TurboJPEG()
         self.undistorted = None
 
         # construct publisher
@@ -55,11 +58,12 @@ class AugmentedRealityNode(DTROS):
     def srvGetApril(self, req):
         print('got undistorted')
         undistorted = req.img.data
-        self.undistorted = cv2.imdecode(undistorted, 0) 
+        print(undistorted)
+        self.undistorted = cv2.imdecode(cv2.UMat(undistorted), 0) 
         
         detected = self.detect_april()
 
-        return
+        return imgResponse()
 
 
     def detect_april(self):

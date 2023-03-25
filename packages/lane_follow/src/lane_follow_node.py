@@ -12,10 +12,17 @@ from geometry_msgs.msg import Point
 from lane_follow.srv import img
 from duckietown_msgs.srv import ChangePattern
 import yaml
+from nav_msgs.msg import Odometry
 
 # Define the HSV color range for road and stop mask
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
 STOP_MASK = [(0, 120, 120), (15, 255, 255)]
+NUM_MASK = [(75, 190, 95), (150, 255, 255)]
+
+# Turn pattern 
+PATH = ['S', 'S', 'L', 'R', 'S', 'R', 'L'] # starting at apriltag 3
+STOP_RED = False
+STOP_BLUE = False
 
 # If using PID controller for collision avoidance
 PID_COLLISION = False 
@@ -43,6 +50,8 @@ class LaneFollowNode(DTROS):
                                     self.callback,
                                     queue_size=1,
                                     buff_size="20MB")
+        self.sub_pose = rospy.Subscriber(f'/{self.veh_name}/deadreckoning_node/odom', 
+                                    Odometry, self.odom_callback)
         
 
         # Initialize distance subscriber and velocity publisher
@@ -66,35 +75,19 @@ class LaneFollowNode(DTROS):
         self.jpeg = TurboJPEG()
         self.undistorted = None
 
-        # Initialize driving behaviour variables
-        self.delay = 0
-        # self.stopping = False
-        self.turning = False
-        self.update = False
-        self.following = -1
-        # self.notSeen = 0
-        self.digit_delay = 0
+        # PID Variables
+        self.proportional = None
+        if ENGLISH:
+            self.offset = -220
+        else:
+            self.offset = 220
 
         self.velocity = 0.3
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
 
-        self.offset = 220
-
-        if ENGLISH:
-            self.offset *= -1
-
-        # Initialize lane following PID Variables
-        self.proportional_lane_following = None
-        self.P_gain_lane_following = 0.049
-        self.D_gain_lane_following = -0.004
-        self.last_error_lane_following = 0
-
-        # Initialize collision PID Variables
-        self.proportional_collision = None
-        self.P_gain_collision = 0.95
-        self.D_gain_collision = -0.004
-        self.last_error_collision = 0
-
+        self.P = 0.035
+        self.D = -0.0025
+        self.last_error = 0
         self.last_time = rospy.get_time()
 
         # Initialize LED pattern change service
@@ -110,157 +103,69 @@ class LaneFollowNode(DTROS):
         # Initialize get digit service
         #digit_service = f'/detect_digit_node/detect_digit'
         #rospy.wait_for_service(digit_service)
-        #self.get_digit = rospy.ServiceProxy(digit_service, ChangePattern)
+        #self.get_digit = rospy.ServiceProxy(digit_service, img)
 
         # Initialize shutdown hook
         rospy.on_shutdown(self.hook)
 
-
-    def callback(self, msg):
-        # decode the received message to an image
+    def ColorMask(self, msg, mask, pid=False, stopping=False, number=False):
         img = self.jpeg.decode(msg.data)
-        print('got img')
         crop = img[300:-1, :, :]
         crop_width = crop.shape[1]
-        
-        img2 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        
-        # https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
-        undistorted = cv2.undistort(img2, self.cam_matrix, self.distort_coeff, None, self.new_cam_matrix)
-        x, y, w, h = self.roi
-        undistorted = undistorted[y:y+h, x:x+w]
-        self.undistorted = CompressedImage(format="jpeg", data=cv2.imencode('.jpg', undistorted)[1].tobytes())
-
-        # convert the cropped image to HSV color space
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
 
-        # create a binary mask for yellow color
-        maskY = cv2.inRange(hsv, ROAD_MASK[0], ROAD_MASK[1])
-        cropY = cv2.bitwise_and(crop, crop, mask=maskY)
-
-         # find contours in the binary mask
-        contoursY, hierarchy = cv2.findContours(maskY,
+        mask = cv2.inRange(hsv, mask[0], mask[1])
+        crop = cv2.bitwise_and(crop, crop, mask=mask)
+        contours_road, hierarchy = cv2.findContours(mask,
                                                cv2.RETR_EXTERNAL,
                                                cv2.CHAIN_APPROX_NONE)
         
-        # create a binary mask for red color
-        maskR = cv2.inRange(hsv, STOP_MASK[0], STOP_MASK[1])
-        cropR = cv2.bitwise_and(crop, crop, mask=maskR)
-
-        # find contours in the binary mask
-        contoursR, hierarchy = cv2.findContours(maskR,
-                                               cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_NONE)
-
-        # Search for lane using yellow color
         max_area = 20
         max_idx = -1
-
-        for i in range(len(contoursY)):
-            # find the contour with the largest area
-            area = cv2.contourArea(contoursY[i])
+        for i in range(len(contours_road)):
+            area = cv2.contourArea(contours_road[i])
             if area > max_area:
                 max_idx = i
                 max_area = area
 
         if max_idx != -1:
-            # calculate the center of the lane using moments
-            M = cv2.moments(contoursY[max_idx])
+            M = cv2.moments(contours_road[max_idx])
             try:
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
 
-                # calculate the error between the center of the lane and the center of the image
-                self.proportional_lane_following = cx - int(crop_width / 2) + self.offset
+                if pid:
+                    self.proportional = cx - int(crop / 2) + self.offset
 
-                # if the error is within a threshold, move straight, otherwise turn right or left
-                # TODO: make this using odometry
-                if self.update:
-                    print('updating   ', self.proportional_lane_following)
-                    self.turning = True
-                    if (self.proportional_lane_following > 200):
-                        self.change_led_lights("2")
-                        print('default right')
-                        self.turn(-7, self.velocity, 2, 1.8)
-                    else:
-                        self.change_led_lights("0")
-                        print('default straight')
-                        self.turn(0, self.velocity, 0.7, 2)
+                elif stopping or cy < 140: # need to tune parameter / and change to or
+                    print('stoping cond cy: ', cy) 
+                    STOP_RED = True 
 
-                    self.change_led_lights("0")
-                    self.update = False
-                    self.turning = False
+                elif number or max_area > 50: # need to tune parameter / and change to or
+                    print('number max_area: ', max_area) 
+                    STOP_BLUE = True 
 
                 if DEBUG:
-                    cv2.drawContours(cropY, contoursY, max_idx, (0, 255, 0), 3)
-                    cv2.circle(cropY, (cx, cy), 7, (0, 0, 255), -1)
+                    cv2.drawContours(crop, contours_road, max_idx, (0, 255, 0), 3)
+                    cv2.circle(crop, (cx, cy), 7, (0, 0, 255), -1)
             except:
                 pass
+
         else:
-            self.proportional_lane_following = None
+            if pid:
+                self.proportional = None
 
-        # Search for stop line using red color
-        max_area = 20
-        max_idx = -1
+            elif stopping: 
+                STOP_RED = False 
 
-        for i in range(len(contoursR)):
-            # find the contour with the largest area
-            area = cv2.contourArea(contoursR[i])
-            if area > max_area:
-                max_idx = i
-                max_area = area
-        
-        if max_idx != -1:
-            M = cv2.moments(contoursR[max_idx])
-            try:
-                cx = int(M['m10'] / M['m00'])
-                cy = int(M['m01'] / M['m00'])
-                 # If the robot has reached the red line, it stops and turns
-                 # TODO: use odometry for this
-                if self.delay <= 0 and cy > 140:
-                    self.turning = True
-                    print('stop, red line')
-                    # Changes the LED lights according to the direction
-                    # it's going to turn (straight, left, right, default)
-                    self.change_led_lights(str(self.following))
-                    self.turn(0, 0, 1, 2)
-                    
-                    
-                    # The robot turns depending on the direction it was following
-                    if (self.following == 0):
-                        print('going straight')
-                        self.turn(0, self.velocity, 0.3, 2)
-                        # Changes LED lights to default
-                        #self.change_led_lights("0")
-                    elif (self.following == 1):
-                        print('going left')
-                        self.turn(3, self.velocity, 0.5, 1.8)
-                        # Changes LED lights to default
-                        #self.change_led_lights("0")
-                    elif (self.following == 2):
-                        print('going right')
-                        self.turn(-4, self.velocity, 0.7, 1.8)
-                        # Changes LED lights to default
-                        #self.change_led_lights("0")
-                    else:
-                        self.turn(0, self.velocity, 2, 2)
-                        self.update = True
+            elif number: 
+                STOP_BLUE = False 
 
-                    
-                    self.turning = False
 
-                # Draws the contour and the centroid on the image if in DEBUG mode
-                if DEBUG:
-                    cv2.drawContours(cropR, contoursR, max_idx, (0, 255, 0), 3)
-                    cv2.circle(cropR, (cx, cy), 7, (0, 0, 255), -1)
-        
-            except:
-                pass
-
-        if DEBUG:
-            rect_img_msg = CompressedImage(format="jpeg", data=self.jpeg.encode(crop))
-            self.pub.publish(rect_img_msg)
+    def callback(self, msg):
+        self.ColorMask(msg, ROAD_MASK, pid=True)
+        self.ColorMask(msg, STOP_MASK, stopping=True)
+        self.ColorMask(msg, NUM_MASK, number=True)
 
 
     def turn(self, v, omega, hz, delay):
@@ -281,77 +186,51 @@ class LaneFollowNode(DTROS):
 
         # Sleep for the desired time to allow the robot to turn
         rate.sleep()
-
                 
 
     def drive(self):
-        # decrease delay by elapsed time
-        self.delay -= (rospy.get_time() - self.last_time)
-        # self.notSeen -= (rospy.get_time() - self.last_time)
-        self.digit_delay -= (rospy.get_time() - self.last_time)
+        if self.proportional is None:
+            self.twist.omega = 0
+            self.last_error = 0
 
-        if self.digit_delay <= 0 and self.undistorted is not None:
-            print('trying to detect')
-            # rate at which we try to find numbers
-            #bounding_box = self.check_digit("checking digit")
-            #print(bounding_box)
+        else:
+            # P Term
+            P = -self.proportional * self.P
 
-            detected = self.check_april_tag()
-            print(detected)
+            # D Term
+            d_error = (self.proportional - self.last_error) / (rospy.get_time() - self.last_time)
+            self.last_error = self.proportional
+            self.last_time = rospy.get_time()
+            D = d_error * self.D
 
-            self.digit_delay = 1
+            self.twist.v = self.velocity
+            self.twist.omega = P + D
+            if DEBUG:
+                self.loginfo(self.proportional, P, D, self.twist.omega, self.twist.v)
 
-        # check if the robot is turning or stopping
-        if not self.turning and self.undistorted is not None:
-            try:
-                #print(self.following)
-                # Lane Following P Term
-                P_lane_following = -self.proportional_lane_following * self.P_gain_lane_following
-                
-                # Lane Following D Term
-                d_error_lane_following = (self.proportional_lane_following - self.last_error_lane_following) / (rospy.get_time() - self.last_time)
-                D_lane_following = d_error_lane_following * self.D_gain_lane_following
-
-                self.last_error_lane_following = self.proportional_lane_following
-
-                # if self.proportional_collision is not None:
-                #     # Collision P Term
-                #     P_collision = self.proportional_collision * self.P_gain_collision
-                    
-                #     # Collision D Term
-                #     d_error_collision = (self.proportional_collision - self.last_error_collision) / (rospy.get_time() - self.last_time)
-                #     D_collision = d_error_collision * self.D_gain_collision
-
-                #     self.last_error_collision = self.proportional_collision
+        self.vel_pub.publish(self.twist)
 
 
-                # # set linear and angular velocity
-                # if PID_COLLISION:
-                #     self.twist.v = P_collision + D_collision
+    def traverse_town(self):
+        rate = rospy.Rate(8)  # 8hz
 
-                # else: 
-                #     print(f'PID lin vel: {P_collision + D_collision}')
-                self.twist.v = self.velocity
+        turn = 0
 
+        while not rospy.is_shutdown():
+            while not STOP_RED and not STOP_BLUE:
+                self.drive()
+                rate.sleep()
 
-                self.twist.omega = P_lane_following + D_lane_following
+            if STOP_RED:
+                self.turn(PATH[turn], inner=False, outer=False)
+                # need to sleep?
+                STOP_RED = False
 
-                if DEBUG:
-                    self.loginfo(self.proportional_lane_following, P_lane_following, D_lane_following, self.twist.omega, self.twist.v)
-
-            except:
-                # robot is lost and doesn't know where to go
-                print('drive: idk where I am')
-                self.twist.v = self.velocity
-                self.twist.omega = 0
-
-
-            # publish twist message
-            self.vel_pub.publish(self.twist)
-            
-        # update last time
-        self.last_time = rospy.get_time()
-
+            elif STOP_BLUE:
+                # sleep? wait for number?  
+                STOP_BLUE = False
+                pass
+    
 
     def hook(self):
         print("SHUTTING DOWN")
@@ -370,15 +249,6 @@ class LaneFollowNode(DTROS):
 
             # Sleep for the desired time to allow the robot to die
             rate.sleep()
-
-    def check_digit(self, msg: str):
-        # stop for a sec
-        msg = String()
-        msg.data = msg
-        self.get_digit(msg)
-
-    def check_april_tag(self):
-        self.get_april(self.undistorted)
 
 
     def change_led_lights(self, dir: str):
@@ -400,6 +270,7 @@ class LaneFollowNode(DTROS):
         msg.data = dir
         self.led_pattern(msg)
         
+
     def readYamlFile(self,fname):
         """
         Reads the YAML file in the path specified by 'fname'.
@@ -419,8 +290,4 @@ class LaneFollowNode(DTROS):
 
 if __name__ == "__main__":
     node = LaneFollowNode("lanefollow_node")
-    rate = rospy.Rate(8)  # 8hz
-    #node.change_led_lights("0")
-    while not rospy.is_shutdown():
-        node.drive()
-        rate.sleep()
+    node.traverse_town()
