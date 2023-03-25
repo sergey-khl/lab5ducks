@@ -75,6 +75,7 @@ class LaneFollowNode(DTROS):
         # PID Variables
         self.proportional = None
         self.proportional_stopline = None
+        self.proportional_number = None
         self.offset = 200  # 220
 
         self.velocity = 0.3
@@ -155,11 +156,10 @@ class LaneFollowNode(DTROS):
                     self.proportional_stopline = (cy/170)*0.14
 
                     if cy >= 170 and cx in range(340, 645):
-                        print('hi')
                         STOP_RED = True
 
                 # If checking for number condition or above the threshold, set STOP_BLUE
-                elif number :
+                elif number:
                     print('number max_area: ', max_area)
                     STOP_BLUE = True
 
@@ -180,6 +180,7 @@ class LaneFollowNode(DTROS):
                 STOP_RED = False
 
             elif number:
+                self.proportional_number = None
                 STOP_BLUE = False
 
 
@@ -263,18 +264,19 @@ class LaneFollowNode(DTROS):
             self.last_error = self.proportional
             self.last_time = rospy.get_time()
             D = d_error * self.D
-
+            self.twist.v = self.velocity
             self.twist.omega = P + D
 
             if DEBUG:
                 print(self.proportional, P, D, self.twist.omega, self.twist.v)
 
-        if self.proportional_stopline is None:
-            self.twist.v = self.velocity
-
-        else:
+        # slow down as robot approches red line
+        if self.proportional_stopline is not None:
             self.twist.v = self.velocity - self.proportional_stopline
-            print('self.twist.v: ', self.twist.v)
+
+        # slow down as robot approches number
+        elif self.proportional_number is not None:
+            self.twist.v -= self.proportional_number
 
         self.vel_pub.publish(self.twist)
 
@@ -298,7 +300,7 @@ class LaneFollowNode(DTROS):
             if STOP_RED:
                 turning_angle = TURN_VALUES[TURNS[turn]]
                 if turning_angle == 0:
-                    self.move_robust(speed=0.15 ,seconds=0.5)
+                    self.move_robust(speed=0.2 ,seconds=0.5)
                     # turn += 1
                     continue # go back into lane following
 
