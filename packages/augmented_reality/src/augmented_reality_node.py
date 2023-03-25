@@ -6,10 +6,12 @@ import cv2
 import numpy as np
 
 from duckietown.dtros import DTROS, NodeType
-from std_msgs.msg import String
+from std_msgs.msg import String, Int32
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Quaternion, Pose, Point, TransformStamped, Vector3, Transforms
-from lane_follow.srv import img
+from turbojpeg import TurboJPEG
+import yaml
+from geometry_msgs.msg import Quaternion, Pose, Point, TransformStamped, Vector3, Transform
+from lane_follow.srv import img, imgResponse
 from dt_apriltags import Detector
 
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
@@ -35,7 +37,20 @@ class AugmentedRealityNode(DTROS):
 
 
         # setup publisher
+        # Initialize TurboJPEG decoder
+        self.jpeg = TurboJPEG()
         self.undistorted = None
+
+        self.calibration_file = f'/data/config/calibrations/camera_intrinsic/default.yaml'
+ 
+        self.calibration = self.readYamlFile(self.calibration_file)
+
+        self.img_width = self.calibration['image_width']
+        self.img_height = self.calibration['image_height']
+        self.cam_matrix = np.array(self.calibration['camera_matrix']['data']).reshape((self.calibration['camera_matrix']['rows'], self.calibration['camera_matrix']['cols']))
+        self.distort_coeff = np.array(self.calibration['distortion_coefficients']['data']).reshape((self.calibration['distortion_coefficients']['rows'], self.calibration['distortion_coefficients']['cols']))
+
+        self.new_cam_matrix, self.roi = cv2.getOptimalNewCameraMatrix(self.cam_matrix, self.distort_coeff, (self.img_width, self.img_height), 1, (self.img_width, self.img_height))
 
         # construct publisher
         self.pub_loc = rospy.Publisher(f'/{self.veh}/teleport', Pose, queue_size=1)
@@ -53,13 +68,15 @@ class AugmentedRealityNode(DTROS):
         self.wizard(Point(*[0.32, 0.3, 0]), Quaternion(*[0, 0, 0, 1]))
 
     def srvGetApril(self, req):
-        print('got undistorted')
-        undistorted = req.img.data
-        self.undistorted = cv2.imdecode(undistorted, 0) 
-        
+        undistorted = self.jpeg.decode(req.img.data)
+        self.undistorted = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
+        resized_image = cv2.resize(self.undistorted, (28, 28))
+        if not cv2.imwrite(f'/data/test/{rospy.Time.now().secs}.jpg', resized_image):
+            raise Exception("Could not write image")
+
         detected = self.detect_april()
 
-        return
+        return imgResponse(Int32(data=detected))
 
 
     def detect_april(self):
@@ -114,7 +131,7 @@ class AugmentedRealityNode(DTROS):
 
             trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/at_{r.tag_id}_estimate", rospy.Time())
 
-            print(f"apriltag ID: {r.tag_id}, \nlocation: {trans.transform.translation.x}, {trans.transform.translation.y}, {0.5}")
+            self.log(f"apriltag ID: {r.tag_id}, \nlocation: {trans.transform.translation.x}, {trans.transform.translation.y}, {0.5}")
 
             #new_img = CompressedImage()
             #new_img.data = cv2.imencode('.jpg', self.undistorted)[1].tobytes()
@@ -136,31 +153,51 @@ class AugmentedRealityNode(DTROS):
 
             # find transform from april tag to wheelbase in worldframe
             # https://github.com/ros/geometry2/blob/noetic-devel/tf2_ros/src/tf2_ros/buffer.py
-            trans = self._tf_buffer.lookup_transform_full(f"{self.veh}/at_{r.tag_id}_estimate", rospy.Time(), f"{self.veh}/base", rospy.Time(), f"{self.veh}/world")
+
+
+
+            # might need -----
+            # trans = self._tf_buffer.lookup_transform_full(f"{self.veh}/at_{r.tag_id}_estimate", rospy.Time(), f"{self.veh}/base", rospy.Time(), f"{self.veh}/world")
             
-            # teleport
-            odom = Odometry()
-            odom.header.stamp = rospy.Time.now()  # Ideally, should be encoder time
-            odom.header.frame_id = f"{self.veh}/at_{r.tag_id}_static"
+            # # teleport
+            # odom = Odometry()
+            # odom.header.stamp = rospy.Time.now()  # Ideally, should be encoder time
+            # odom.header.frame_id = f"{self.veh}/at_{r.tag_id}_static"
 
-            self._tf_broadcaster.sendTransform(TransformStamped(
-                    header=odom.header,
-                    child_frame_id=f"{self.veh}/robo_estimate",
-                    transform=trans.transform,
-                )
-            )
+            # self._tf_broadcaster.sendTransform(TransformStamped(
+            #         header=odom.header,
+            #         child_frame_id=f"{self.veh}/robo_estimate",
+            #         transform=trans.transform,
+            #     )
+            # )
 
 
-            trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/robo_estimate", rospy.Time())
+            # trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/robo_estimate", rospy.Time())
 
             
 
-            self.wizard(Point(*[trans.transform.translation.x, trans.transform.translation.y, 0]), trans.transform.rotation)
-            return True
+            # self.wizard(Point(*[trans.transform.translation.x, trans.transform.translation.y, 0]), trans.transform.rotation)
+            return 1
         except Exception as e:
             print(e)
-            self.change_led_lights("white")
-            return False
+            #self.change_led_lights("white")
+            return 0
+        
+    def readYamlFile(self,fname):
+        """
+        Reads the YAML file in the path specified by 'fname'.
+        E.G. :
+            the calibration file is located in : `/data/config/calibrations/filename/DUCKIEBOT_NAME.yaml`
+        """
+        with open(fname, 'r') as in_file:
+            try:
+                yaml_dict = yaml.load(in_file)
+                return yaml_dict
+            except yaml.YAMLError as exc:
+                self.log("YAML syntax error. File: %s fname. Exc: %s"
+                        %(fname, exc), type='fatal')
+                rospy.signal_shutdown()
+                return
 
     def wizard(self, tran, rot):
         pose = Pose(tran, rot)
