@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 
+import cv2
+import numpy as np
 import rospy
+
 from duckietown.dtros import DTROS, NodeType
 from sensor_msgs.msg import CameraInfo, CompressedImage
 from std_msgs.msg import Float32, String
 from turbojpeg import TurboJPEG
-import cv2
-import numpy as np
+
 from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 from lane_follow.srv import img
 from duckietown_msgs.srv import ChangePattern
 import yaml
-from nav_msgs.msg import Odometry
+import tf.transformations as tft
+
 
 # Define the HSV color range for road and stop mask
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
@@ -20,18 +24,14 @@ STOP_MASK = [(0, 120, 120), (15, 255, 255)]
 NUM_MASK = [(75, 190, 95), (150, 255, 255)]
 
 # Turn pattern 
-PATH = ['S', 'S', 'L', 'R', 'S', 'R', 'L'] # starting at apriltag 3
+TURNS = ['S', 'S', 'L', 'R', 'S', 'R', 'L'] # starting at apriltag 3
+TURN_VALUES = {'S': 0, 'L': np.pi/2, 'R': -np.pi/2}
 STOP_RED = False
 STOP_BLUE = False
-
-# If using PID controller for collision avoidance
-PID_COLLISION = False 
 
 # Set debugging mode (change to True to enable)
 DEBUG = False
 
-# Determines what side of the road the robot drives on (change to True to dirve on left)
-ENGLISH = False
 
 class LaneFollowNode(DTROS):
     def __init__(self, node_name):
@@ -49,10 +49,7 @@ class LaneFollowNode(DTROS):
                                     CompressedImage,
                                     self.callback,
                                     queue_size=1,
-                                    buff_size="20MB")
-        self.sub_pose = rospy.Subscriber(f'/{self.veh_name}/deadreckoning_node/odom', 
-                                    Odometry, self.odom_callback)
-        
+                                    buff_size="20MB")        
 
         # Initialize distance subscriber and velocity publisher
         #self.sub_ml = rospy.Subscriber("/" + self.veh + "/augmented_reality_node/position", Point, self.cb_april, queue_size=1)
@@ -77,10 +74,7 @@ class LaneFollowNode(DTROS):
 
         # PID Variables
         self.proportional = None
-        if ENGLISH:
-            self.offset = -220
-        else:
-            self.offset = 220
+        self.offset = 220
 
         self.velocity = 0.3
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
@@ -89,6 +83,19 @@ class LaneFollowNode(DTROS):
         self.D = -0.0025
         self.last_error = 0
         self.last_time = rospy.get_time()
+
+        self.kp_straight = 1
+        self.kp_turn = 1
+
+        # Robot Pose Variables
+        self.x = 0
+        self.y = 0
+        self.z = 0
+        self.orientation = 0
+        
+        self.subscriber = rospy.Subscriber(f'/{self.veh_name}/deadreckoning_node/odom', 
+                                           Odometry, 
+                                           self.odom_callback)
 
         # Initialize LED pattern change service
         led_service = f'/{self.veh}/led_controller_node/led_pattern'
@@ -108,18 +115,25 @@ class LaneFollowNode(DTROS):
         # Initialize shutdown hook
         rospy.on_shutdown(self.hook)
 
+
     def ColorMask(self, msg, mask, pid=False, stopping=False, number=False):
+        # Decode the JPEG image from the message
         img = self.jpeg.decode(msg.data)
+        # Crop the image to focus on the region of interest
         crop = img[300:-1, :, :]
         crop_width = crop.shape[1]
+        # Convert the cropped image to HSV color space
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
 
+        # Apply the color mask to the HSV image
         mask = cv2.inRange(hsv, mask[0], mask[1])
         crop = cv2.bitwise_and(crop, crop, mask=mask)
+        # Find contours in the masked image
         contours_road, hierarchy = cv2.findContours(mask,
-                                               cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_NONE)
-        
+                                            cv2.RETR_EXTERNAL,
+                                            cv2.CHAIN_APPROX_NONE)
+
+        # Find the largest contour
         max_area = 20
         max_idx = -1
         for i in range(len(contours_road)):
@@ -128,65 +142,138 @@ class LaneFollowNode(DTROS):
                 max_idx = i
                 max_area = area
 
+        # If a contour is found
         if max_idx != -1:
+            # Calculate the centroid of the contour
             M = cv2.moments(contours_road[max_idx])
             try:
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
 
+                # If using PID control, update the proportional term
                 if pid:
                     self.proportional = cx - int(crop / 2) + self.offset
 
-                elif stopping or cy < 140: # need to tune parameter / and change to or
-                    print('stoping cond cy: ', cy) 
-                    STOP_RED = True 
+                # If checking for stopping condition or below the threshold, set STOP_RED
+                elif stopping or cy < 140:
+                    print('stoping cond cy: ', cy)
+                    STOP_RED = True
 
-                elif number or max_area > 50: # need to tune parameter / and change to or
-                    print('number max_area: ', max_area) 
-                    STOP_BLUE = True 
+                # If checking for number condition or above the threshold, set STOP_BLUE
+                elif number or max_area > 50:
+                    print('number max_area: ', max_area)
+                    STOP_BLUE = True
 
+                # Draw the contour and centroid on the image (for debugging)
                 if DEBUG:
                     cv2.drawContours(crop, contours_road, max_idx, (0, 255, 0), 3)
                     cv2.circle(crop, (cx, cy), 7, (0, 0, 255), -1)
             except:
                 pass
 
+        # If no contour is found, reset the flags
         else:
             if pid:
                 self.proportional = None
 
-            elif stopping: 
-                STOP_RED = False 
+            elif stopping:
+                STOP_RED = False
 
-            elif number: 
-                STOP_BLUE = False 
+            elif number:
+                STOP_BLUE = False
 
 
     def callback(self, msg):
+        # Process the image for PID control using the ROAD_MASK
         self.ColorMask(msg, ROAD_MASK, pid=True)
+        # Process the image for stopping condition using the STOP_MASK
         self.ColorMask(msg, STOP_MASK, stopping=True)
+        # Process the image for number condition using the NUM_MASK
         self.ColorMask(msg, NUM_MASK, number=True)
 
 
-    def turn(self, v, omega, hz, delay):
-        # Set the rate at which to publish the twist messages
-        rate = rospy.Rate(hz)
-        # Set the delay before the next movement
-        self.delay = delay
+    def odom_callback(self, data):
+        orientation_quaternion = data.pose.pose.orientation
+        _, _, yaw = tft.euler_from_quaternion([
+            orientation_quaternion.x,
+            orientation_quaternion.y,
+            orientation_quaternion.z,
+            orientation_quaternion.w
+        ])
+        self.orientation = yaw
 
-        # Set the linear velocity of the robot
-        self.twist.v = v
+        # Get position data
+        position = data.pose.pose.position
+        x, y, z = position.x, position.y, position.z
 
-        # Set the angular velocity of the robot
-        self.twist.omega = omega
 
-        # Publish the twist message multiple times to ensure the robot turns
-        for i in range(8):
-            self.vel_pub.publish(self.twist)
+    def turn(self, r, turning_angle):
+        # Get the initial orientation from the odom_callback function
+        current_orientation = self.orientation
 
-        # Sleep for the desired time to allow the robot to turn
-        rate.sleep()
-                
+        # Calculate the target orientation (90 degrees counterclockwise)
+        target_orientation = current_orientation + turning_angle
+        
+        orientation_error = target_orientation - current_orientation
+
+        last_time = rospy.Time.now()
+
+        # Create a rospy.Rate object to maintain the loop rate at 8 Hz
+        rate = rospy.Rate(8)
+
+        while abs(orientation_error) > 0.01:
+            print('orientation_error: ', orientation_error)
+            # Calculate the angular speed using a simple proportional controller
+            angular_speed = self.kp_turn * orientation_error
+
+            # Set the linear speed based on the angular speed and the desired radius
+            linear_speed = angular_speed * r
+            linear_speed = min(linear_speed, self.velocity)  # Limit the linear speed to the target speed
+
+            # Set the linear and angular speeds in the Twist message
+            self.twist.v = linear_speed
+            self.twist.omega = angular_speed
+            rate.sleep()
+
+            # Calculate the time elapsed between loop iterations
+            current_time = rospy.Time.now()
+            time_elapsed = (current_time - last_time).to_sec()
+
+            # Update the current orientation using the angular speed and time elapsed
+            current_orientation += angular_speed * time_elapsed
+            last_time = current_time
+
+
+    def drive_straight(self, n, min_speed=0.3):
+        # Set the target distance
+        current_distance = 0
+        target_distance = n
+
+        distance_error = target_distance - current_distance
+        
+        last_time = rospy.Time.now()
+        rate = rospy.Rate(8)
+        
+        while abs(distance_error) > 0.01:
+            print('distance_error: ', distance_error)
+
+            # Calculate the linear speed using a simple proportional controller
+            linear_speed = self.kp_straight * distance_error
+            linear_speed = min(linear_speed, min_speed)  # Limit the linear speed to the desired speed
+
+            # Set the linear and angular speeds in the Twist message
+            self.twist.v = linear_speed
+            self.twist.omega = 0
+            rate.sleep()
+
+            # Calculate the time elapsed between loop iterations
+            current_time = rospy.Time.now()
+            time_elapsed = (current_time - last_time).to_sec()
+
+            # Update the current orientation using the angular speed and time elapsed
+            current_distance += linear_speed * time_elapsed
+            last_time = current_time
+
 
     def drive(self):
         if self.proportional is None:
@@ -221,34 +308,39 @@ class LaneFollowNode(DTROS):
                 self.drive()
                 rate.sleep()
 
+            self.stop_robust()
+
             if STOP_RED:
-                self.turn(PATH[turn], inner=False, outer=False)
-                # need to sleep?
-                STOP_RED = False
+                turning_angle = TURN_VALUES[TURNS[turn]]
+                if turning_angle == 0:
+                    self.drive_straight() # find distance
+
+                else:
+                    self.turn(1, turning_angle) # need to change r
+                    turn += 1
+                    STOP_RED = False
 
             elif STOP_BLUE:
                 # sleep? wait for number?  
                 STOP_BLUE = False
-                pass
-    
+                
 
-    def hook(self):
-        print("SHUTTING DOWN")
-        # have 1 delay to avoid 0 division error
+    def stop_robust(self):
         rate = rospy.Rate(10)
 
-        # Set the linear velocity of the robot
         self.twist.v = 0
-
-        # Set the angular velocity of the robot
         self.twist.omega = 0
 
-        # Publish the twist message multiple times to ensure the robot turns
+        # Publish the twist message multiple times to ensure the robot stops
         for i in range(20):
             self.vel_pub.publish(self.twist)
 
-            # Sleep for the desired time to allow the robot to die
             rate.sleep()
+
+
+    def hook(self):
+        print("SHUTTING DOWN")
+        self.stop_robust()
 
 
     def change_led_lights(self, dir: str):
