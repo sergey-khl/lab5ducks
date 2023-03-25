@@ -88,9 +88,7 @@ class LaneFollowNode(DTROS):
         self.kp_turn = 1
 
         # Robot Pose Variables
-        self.x = 0
-        self.y = 0
-        self.z = 0
+        self.displacement = 0
         self.orientation = 0
         
         self.subscriber = rospy.Subscriber(f'/{self.veh_name}/deadreckoning_node/odom', 
@@ -188,7 +186,7 @@ class LaneFollowNode(DTROS):
         self.ColorMask(msg, ROAD_MASK, pid=True)
         # Process the image for stopping condition using the STOP_MASK
         self.ColorMask(msg, STOP_MASK, stopping=True)
-        # Process the image for number condition using the NUM_MASK
+        # Process the image for number stopping condition using the NUM_MASK
         self.ColorMask(msg, NUM_MASK, number=True)
 
 
@@ -205,6 +203,10 @@ class LaneFollowNode(DTROS):
         # Get position data
         position = data.pose.pose.position
         x, y, z = position.x, position.y, position.z
+
+        # Calculate displacement from the origin
+        displacement = np.sqrt(x**2 + y**2 + z**2)
+        self.displacement = displacement
 
 
     def turn(self, r, turning_angle):
@@ -223,6 +225,8 @@ class LaneFollowNode(DTROS):
 
         while abs(orientation_error) > 0.01:
             print('orientation_error: ', orientation_error)
+            orientation_error = self.target_orientation - self.orientation
+
             # Calculate the angular speed using a simple proportional controller
             angular_speed = self.kp_turn * orientation_error
 
@@ -245,17 +249,17 @@ class LaneFollowNode(DTROS):
 
 
     def drive_straight(self, n, min_speed=0.3):
-        # Set the target distance
-        current_distance = 0
+        initial_displacement = self.displacement
         target_distance = n
 
-        distance_error = target_distance - current_distance
+        distance_error = target_distance - (self.displacement - initial_displacement)
         
         last_time = rospy.Time.now()
         rate = rospy.Rate(8)
         
         while abs(distance_error) > 0.01:
             print('distance_error: ', distance_error)
+            distance_error = target_distance - (self.displacement - initial_displacement)
 
             # Calculate the linear speed using a simple proportional controller
             linear_speed = self.kp_straight * distance_error
@@ -304,24 +308,29 @@ class LaneFollowNode(DTROS):
         turn = 0
 
         while not rospy.is_shutdown():
+
+            # Continue driving until a stop sign (red) or a number sign (blue) is detected
             while not STOP_RED and not STOP_BLUE:
                 self.drive()
                 rate.sleep()
 
+            # Stop the Duckiebot once a sign is detected
             self.stop_robust()
 
+            # If a stop line is detected
             if STOP_RED:
                 turning_angle = TURN_VALUES[TURNS[turn]]
                 if turning_angle == 0:
-                    self.drive_straight() # find distance
+                    self.drive_straight(n=0.3) # need to find distance
 
                 else:
-                    self.turn(1, turning_angle) # need to change r
+                    self.turn(1, turning_angle) # need to change r (will depend on which circle we are in)
                     turn += 1
                     STOP_RED = False
 
+            # If a number sign is detected
             elif STOP_BLUE:
-                # sleep? wait for number?  
+                # sleep? wait for number? Sergy? 
                 STOP_BLUE = False
                 
 
@@ -332,9 +341,8 @@ class LaneFollowNode(DTROS):
         self.twist.omega = 0
 
         # Publish the twist message multiple times to ensure the robot stops
-        for i in range(20):
+        for i in range(10):
             self.vel_pub.publish(self.twist)
-
             rate.sleep()
 
 
