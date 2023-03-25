@@ -39,6 +39,8 @@ class AugmentedRealityNode(DTROS):
         # setup publisher
         # Initialize TurboJPEG decoder
         self.jpeg = TurboJPEG()
+        # Initialize TurboJPEG decoder
+        self.jpeg = TurboJPEG()
         self.undistorted = None
 
         self.calibration_file = f'/data/config/calibrations/camera_intrinsic/default.yaml'
