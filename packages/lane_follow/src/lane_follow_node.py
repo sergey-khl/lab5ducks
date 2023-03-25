@@ -3,6 +3,7 @@
 import cv2
 import numpy as np
 import rospy
+import yaml
 
 from duckietown.dtros import DTROS, NodeType
 from sensor_msgs.msg import CameraInfo, CompressedImage
@@ -10,18 +11,17 @@ from std_msgs.msg import Float32, String
 from turbojpeg import TurboJPEG
 
 from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped
+import tf.transformations as tft
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 from lane_follow.srv import img
 from duckietown_msgs.srv import ChangePattern
-import yaml
-import tf.transformations as tft
 
 
 # Define the HSV color range for road and stop mask
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
 STOP_MASK = [(0, 120, 120), (15, 255, 255)]
-NUM_MASK = [(75, 190, 95), (150, 255, 255)]
+NUM_MASK = [(75, 190, 95), (150, 255, 255)] # needs work
 
 # Turn pattern 
 TURNS = ['S', 'S', 'L', 'R', 'S', 'R', 'L'] # starting at apriltag 3
@@ -31,7 +31,6 @@ STOP_BLUE = False
 
 # Set debugging mode (change to True to enable)
 DEBUG = False
-
 
 class LaneFollowNode(DTROS):
     def __init__(self, node_name):
@@ -116,7 +115,7 @@ class LaneFollowNode(DTROS):
         rospy.on_shutdown(self.hook)
 
 
-    def ColorMask(self, img, mask, crop_width, pid=False, stopping=False, number=False):
+    def color_mask(self, img, mask, crop_width, pid=False, stopping=False, number=False):
         global STOP_RED, STOP_BLUE
         # Convert the cropped image to HSV color space
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -162,6 +161,12 @@ class LaneFollowNode(DTROS):
                 elif number:
                     print('number max_area: ', max_area)
                     STOP_BLUE = True
+                    
+                    # !! testing !!
+                    cv2.drawContours(crop, contours_road, max_idx, (0, 255, 0), 3)
+                    cv2.circle(crop, (cx, cy), 7, (0, 0, 255), -1)
+
+                    return crop
 
                 # Draw the contour and centroid on the image (for debugging)
                 if DEBUG:
@@ -192,11 +197,11 @@ class LaneFollowNode(DTROS):
         crop_width = crop.shape[1]
 
         # Process the image for PID control using the ROAD_MASK
-        self.ColorMask(crop, ROAD_MASK, crop_width, pid=True)
+        self.color_mask(crop, ROAD_MASK, crop_width, pid=True)
         # Process the image for stopping condition using the STOP_MASK
-        self.ColorMask(crop, STOP_MASK, crop_width, stopping=True)
+        self.color_mask(crop, STOP_MASK, crop_width, stopping=True)
         # Process the image for number stopping condition using the NUM_MASK
-        self.ColorMask(crop, NUM_MASK, crop_width, number=True)
+        crop = self.color_mask(crop, NUM_MASK, crop_width, number=True)
 
 
     def odom_callback(self, data):
@@ -208,6 +213,7 @@ class LaneFollowNode(DTROS):
             orientation_quaternion.w
         ])
         self.orientation = yaw
+        print('orientation', yaw)
 
         # Get position data
         position = data.pose.pose.position
@@ -219,13 +225,11 @@ class LaneFollowNode(DTROS):
 
 
     def turn(self, r, turning_angle):
-        # Get the initial orientation from the odom_callback function
-        current_orientation = self.orientation
 
         # Calculate the target orientation (90 degrees counterclockwise)
-        target_orientation = current_orientation + turning_angle
+        target_orientation = self.orientation + turning_angle
         
-        orientation_error = target_orientation - current_orientation
+        orientation_error = target_orientation - self.orientation
 
         # Create a rospy.Rate object to maintain the loop rate at 8 Hz
         rate = rospy.Rate(8)
@@ -234,8 +238,10 @@ class LaneFollowNode(DTROS):
             print('orientation_error: ', orientation_error)
             orientation_error = self.target_orientation - self.orientation
 
-            # Calculate the angular speed using a simple proportional controller
-            angular_speed = self.kp_turn * orientation_error
+            # Calculate the angular speed using a simple controller
+            angular_speed = np.log(np.sign(orientation_error) * orientation_error + 0.2) +0.28
+
+            print('angular_speed', angular_speed)
 
             # Set the linear speed based on the angular speed and the desired radius
             linear_speed = angular_speed * r
@@ -288,6 +294,7 @@ class LaneFollowNode(DTROS):
         turn = 0
 
         while not rospy.is_shutdown():
+            continue
             # Continue driving until a stop sign (red) or a number sign (blue) is detected
             while not STOP_RED and not STOP_BLUE:
                 self.drive()
