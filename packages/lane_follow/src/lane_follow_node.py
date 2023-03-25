@@ -21,7 +21,7 @@ from duckietown_msgs.srv import ChangePattern
 # Define the HSV color range for road and stop mask
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
 STOP_MASK = [(0, 120, 120), (15, 255, 255)]
-NUM_MASK = [(75, 190, 95), (150, 255, 255)] # needs work
+NUM_MASK = [(90, 85, 46), (175, 255, 255)]
 
 # Turn pattern 
 TURNS = ['S', 'S', 'L', 'R', 'S', 'R', 'L'] # starting at apriltag 3
@@ -85,7 +85,6 @@ class LaneFollowNode(DTROS):
         self.last_error = 0
         self.last_time = rospy.get_time()
 
-        self.kp_straight = 1
         self.kp_turn = 1
 
         # Robot Pose Variables
@@ -102,9 +101,9 @@ class LaneFollowNode(DTROS):
         self.led_pattern = rospy.ServiceProxy(led_service, ChangePattern)
 
         # Initialize get april tag service
-        # april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
-        # rospy.wait_for_service(april_service)
-        # self.get_april = rospy.ServiceProxy(april_service, img)
+        april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
+        rospy.wait_for_service(april_service)
+        self.get_april = rospy.ServiceProxy(april_service, img)
 
         # Initialize get digit service
         #digit_service = f'/detect_digit_node/detect_digit'
@@ -151,7 +150,7 @@ class LaneFollowNode(DTROS):
 
                 # If checking for stopping condition or below the threshold, set STOP_RED
                 elif stopping:
-                    print('stoping cond cy: ', cy, cx)
+                    # print('stoping cond cy: ', cy, cx)
                     self.proportional_stopline = (cy/170)*0.14
 
                     if cy >= 170 and cx in range(340, 645):
@@ -189,6 +188,10 @@ class LaneFollowNode(DTROS):
                 STOP_BLUE = False
 
 
+    def find_num_box(self):
+        pass
+
+
     def callback(self, msg):
         # Decode the JPEG image from the message
         img = self.jpeg.decode(msg.data)
@@ -213,7 +216,6 @@ class LaneFollowNode(DTROS):
             orientation_quaternion.w
         ])
         self.orientation = yaw
-        print('orientation', yaw)
 
         # Get position data
         position = data.pose.pose.position
@@ -301,14 +303,21 @@ class LaneFollowNode(DTROS):
                 rate.sleep()
 
             # Stop the Duckiebot once a sign is detected
+            before_stop_red, before_stop_blue = STOP_RED, STOP_BLUE
             self.move_robust(speed=0 ,seconds=1)
+            STOP_RED, STOP_BLUE = before_stop_red, before_stop_blue
+
+            print('out', 'STOP_RED', STOP_RED)
 
             # If a stop line is detected
             if STOP_RED:
                 turning_angle = TURN_VALUES[TURNS[turn]]
+                print(turning_angle)
                 if turning_angle == 0:
-                    self.move_robust(speed=0.2 ,seconds=0.5)
+                    self.move_robust(speed=0.2 ,seconds=0.6)
+
                     # turn += 1
+                    STOP_RED = False
                     continue # go back into lane following
 
                 else:
@@ -324,6 +333,7 @@ class LaneFollowNode(DTROS):
 
     def move_robust(self, speed, seconds):
         rate = rospy.Rate(10)
+        print('speed', speed)
 
         self.twist.v = speed
         self.twist.omega = 0
