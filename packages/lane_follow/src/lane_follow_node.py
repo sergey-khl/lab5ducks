@@ -74,7 +74,8 @@ class LaneFollowNode(DTROS):
 
         # PID Variables
         self.proportional = None
-        self.offset = 220
+        self.proportional_stopline = None
+        self.offset = 200  # 220
 
         self.velocity = 0.3
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
@@ -91,7 +92,7 @@ class LaneFollowNode(DTROS):
         self.displacement = 0
         self.orientation = 0
         
-        self.subscriber = rospy.Subscriber(f'/{self.veh_name}/deadreckoning_node/odom', 
+        self.subscriber = rospy.Subscriber(f'/{self.veh}/deadreckoning_node/odom', 
                                            Odometry, 
                                            self.odom_callback)
 
@@ -101,9 +102,9 @@ class LaneFollowNode(DTROS):
         self.led_pattern = rospy.ServiceProxy(led_service, ChangePattern)
 
         # Initialize get april tag service
-        april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
-        rospy.wait_for_service(april_service)
-        self.get_april = rospy.ServiceProxy(april_service, img)
+        # april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
+        # rospy.wait_for_service(april_service)
+        # self.get_april = rospy.ServiceProxy(april_service, img)
 
         # Initialize get digit service
         #digit_service = f'/detect_digit_node/detect_digit'
@@ -114,18 +115,14 @@ class LaneFollowNode(DTROS):
         rospy.on_shutdown(self.hook)
 
 
-    def ColorMask(self, msg, mask, pid=False, stopping=False, number=False):
-        # Decode the JPEG image from the message
-        img = self.jpeg.decode(msg.data)
-        # Crop the image to focus on the region of interest
-        crop = img[300:-1, :, :]
-        crop_width = crop.shape[1]
+    def ColorMask(self, img, mask, crop_width, pid=False, stopping=False, number=False):
+        global STOP_RED, STOP_BLUE
         # Convert the cropped image to HSV color space
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
         # Apply the color mask to the HSV image
         mask = cv2.inRange(hsv, mask[0], mask[1])
-        crop = cv2.bitwise_and(crop, crop, mask=mask)
+        crop = cv2.bitwise_and(img, img, mask=mask)
         # Find contours in the masked image
         contours_road, hierarchy = cv2.findContours(mask,
                                             cv2.RETR_EXTERNAL,
@@ -150,15 +147,19 @@ class LaneFollowNode(DTROS):
 
                 # If using PID control, update the proportional term
                 if pid:
-                    self.proportional = cx - int(crop / 2) + self.offset
+                    self.proportional = cx - int(crop_width / 2) + self.offset
 
                 # If checking for stopping condition or below the threshold, set STOP_RED
-                elif stopping or cy < 140:
-                    print('stoping cond cy: ', cy)
-                    STOP_RED = True
+                elif stopping:
+                    print('stoping cond cy: ', cy, cx)
+                    self.proportional_stopline = (cy/170)*0.14
+
+                    if cy >= 170 and cx in range(340, 645):
+                        print('hi')
+                        STOP_RED = True
 
                 # If checking for number condition or above the threshold, set STOP_BLUE
-                elif number or max_area > 50:
+                elif number :
                     print('number max_area: ', max_area)
                     STOP_BLUE = True
 
@@ -175,6 +176,7 @@ class LaneFollowNode(DTROS):
                 self.proportional = None
 
             elif stopping:
+                self.proportional_stopline = None
                 STOP_RED = False
 
             elif number:
@@ -182,12 +184,18 @@ class LaneFollowNode(DTROS):
 
 
     def callback(self, msg):
+        # Decode the JPEG image from the message
+        img = self.jpeg.decode(msg.data)
+        # Crop the image to focus on the region of interest
+        crop = img[300:-1, :, :]
+        crop_width = crop.shape[1]
+
         # Process the image for PID control using the ROAD_MASK
-        self.ColorMask(msg, ROAD_MASK, pid=True)
+        self.ColorMask(crop, ROAD_MASK, crop_width, pid=True)
         # Process the image for stopping condition using the STOP_MASK
-        self.ColorMask(msg, STOP_MASK, stopping=True)
+        self.ColorMask(crop, STOP_MASK, crop_width, stopping=True)
         # Process the image for number stopping condition using the NUM_MASK
-        self.ColorMask(msg, NUM_MASK, number=True)
+        self.ColorMask(crop, NUM_MASK, crop_width, number=True)
 
 
     def odom_callback(self, data):
@@ -218,8 +226,6 @@ class LaneFollowNode(DTROS):
         
         orientation_error = target_orientation - current_orientation
 
-        last_time = rospy.Time.now()
-
         # Create a rospy.Rate object to maintain the loop rate at 8 Hz
         rate = rospy.Rate(8)
 
@@ -237,46 +243,10 @@ class LaneFollowNode(DTROS):
             # Set the linear and angular speeds in the Twist message
             self.twist.v = linear_speed
             self.twist.omega = angular_speed
+
+            self.vel_pub.publish(self.twist)
+
             rate.sleep()
-
-            # Calculate the time elapsed between loop iterations
-            current_time = rospy.Time.now()
-            time_elapsed = (current_time - last_time).to_sec()
-
-            # Update the current orientation using the angular speed and time elapsed
-            current_orientation += angular_speed * time_elapsed
-            last_time = current_time
-
-
-    def drive_straight(self, n, min_speed=0.3):
-        initial_displacement = self.displacement
-        target_distance = n
-
-        distance_error = target_distance - (self.displacement - initial_displacement)
-        
-        last_time = rospy.Time.now()
-        rate = rospy.Rate(8)
-        
-        while abs(distance_error) > 0.01:
-            print('distance_error: ', distance_error)
-            distance_error = target_distance - (self.displacement - initial_displacement)
-
-            # Calculate the linear speed using a simple proportional controller
-            linear_speed = self.kp_straight * distance_error
-            linear_speed = min(linear_speed, min_speed)  # Limit the linear speed to the desired speed
-
-            # Set the linear and angular speeds in the Twist message
-            self.twist.v = linear_speed
-            self.twist.omega = 0
-            rate.sleep()
-
-            # Calculate the time elapsed between loop iterations
-            current_time = rospy.Time.now()
-            time_elapsed = (current_time - last_time).to_sec()
-
-            # Update the current orientation using the angular speed and time elapsed
-            current_distance += linear_speed * time_elapsed
-            last_time = current_time
 
 
     def drive(self):
@@ -294,34 +264,43 @@ class LaneFollowNode(DTROS):
             self.last_time = rospy.get_time()
             D = d_error * self.D
 
-            self.twist.v = self.velocity
             self.twist.omega = P + D
+
             if DEBUG:
-                self.loginfo(self.proportional, P, D, self.twist.omega, self.twist.v)
+                print(self.proportional, P, D, self.twist.omega, self.twist.v)
+
+        if self.proportional_stopline is None:
+            self.twist.v = self.velocity
+
+        else:
+            self.twist.v = self.velocity - self.proportional_stopline
+            print('self.twist.v: ', self.twist.v)
 
         self.vel_pub.publish(self.twist)
 
 
     def traverse_town(self):
+        global STOP_RED, STOP_BLUE
         rate = rospy.Rate(8)  # 8hz
 
         turn = 0
 
         while not rospy.is_shutdown():
-
             # Continue driving until a stop sign (red) or a number sign (blue) is detected
             while not STOP_RED and not STOP_BLUE:
                 self.drive()
                 rate.sleep()
 
             # Stop the Duckiebot once a sign is detected
-            self.stop_robust()
+            self.move_robust(speed=0 ,seconds=1)
 
             # If a stop line is detected
             if STOP_RED:
                 turning_angle = TURN_VALUES[TURNS[turn]]
                 if turning_angle == 0:
-                    self.drive_straight(n=0.3) # need to find distance
+                    self.move_robust(speed=0.15 ,seconds=0.5)
+                    # turn += 1
+                    continue # go back into lane following
 
                 else:
                     self.turn(1, turning_angle) # need to change r (will depend on which circle we are in)
@@ -334,21 +313,21 @@ class LaneFollowNode(DTROS):
                 STOP_BLUE = False
                 
 
-    def stop_robust(self):
+    def move_robust(self, speed, seconds):
         rate = rospy.Rate(10)
 
-        self.twist.v = 0
+        self.twist.v = speed
         self.twist.omega = 0
 
         # Publish the twist message multiple times to ensure the robot stops
-        for i in range(10):
+        for i in range(int(10*seconds)):
             self.vel_pub.publish(self.twist)
             rate.sleep()
 
 
     def hook(self):
         print("SHUTTING DOWN")
-        self.stop_robust()
+        self.move_robust(0)
 
 
     def change_led_lights(self, dir: str):
