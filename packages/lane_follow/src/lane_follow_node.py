@@ -62,7 +62,6 @@ class LaneFollowNode(DTROS):
         # PID Variables
         self.proportional = None
         self.proportional_stopline = None
-        self.proportional_number = None
         self.offset = 200  # 220
 
         self.velocity = 0.3
@@ -74,6 +73,9 @@ class LaneFollowNode(DTROS):
         self.last_time = rospy.get_time()
 
         self.kp_turn = 1
+
+        # number area 
+        self.last_num_area = 0
 
         # Robot Pose Variables
         self.displacement = 0
@@ -151,15 +153,27 @@ class LaneFollowNode(DTROS):
                 # If checking for stopping condition or below the threshold, set STOP_RED
                 elif stopping:
                     # print('stoping cond cy: ', cy, cx)
-                    self.proportional_stopline = (cy/170)*0.14
+                    if cx > 50:
+                        self.proportional_stopline = (cy/170)*0.14
+                    else: 
+                        self.proportional_stopline = None
+
+                    if cy >= 20:
+                        STOP_BLUE = False
 
                     if cy >= 170 and cx in range(340, 645):
                         STOP_RED = True
 
                 # If checking for number condition or above the threshold, set STOP_BLUE
-                elif number:
-                    print('number max_area: ', max_area)
-                    STOP_BLUE = True
+                elif number and max_area < 2500:
+                    print('max_area', max_area)
+
+                    if max_area >= 2100:
+                        print('cy: ', cy, 'cx: ', cx)
+                        STOP_BLUE = True
+
+                else:
+                    STOP_RED = STOP_BLUE = False
 
                 # Draw the contour and centroid on the image (for debugging)
                 if DEBUG:
@@ -178,7 +192,6 @@ class LaneFollowNode(DTROS):
                 STOP_RED = False
 
             elif number:
-                self.proportional_number = None
                 STOP_BLUE = False
 
 
@@ -194,10 +207,10 @@ class LaneFollowNode(DTROS):
 
         # Process the image for PID control using the ROAD_MASK
         self.color_mask(crop_road, ROAD_MASK, crop_width, pid=True)
-        # Process the image for stopping condition using the STOP_MASK
-        self.color_mask(crop_road, STOP_MASK, crop_width, stopping=True)
         # Process the image for number stopping condition using the NUM_MASK
         self.color_mask(crop_sign, NUM_MASK, crop_width, number=True)
+        # Process the image for stopping condition using the STOP_MASK
+        self.color_mask(crop_road, STOP_MASK, crop_width, stopping=True)
 
 
     def odom_callback(self, data):
@@ -265,20 +278,17 @@ class LaneFollowNode(DTROS):
             self.last_error = self.proportional
             self.last_time = rospy.get_time()
             D = d_error * self.D
-            self.twist.v = self.velocity
             self.twist.omega = P + D
 
             if DEBUG:
                 print(self.proportional, P, D, self.twist.omega, self.twist.v)
 
-        # slow down as robot approches red line
-        if self.proportional_stopline is not None:
+        if self.proportional_stopline is None:
+            self.twist.v = self.velocity
+
+        else:
             self.twist.v = self.velocity - self.proportional_stopline
-
-        # slow down as robot approches number
-        elif self.proportional_number is not None:
-            self.twist.v = self.velocity - self.proportional_number
-
+        
         self.vel_pub.publish(self.twist)
 
 
@@ -299,15 +309,19 @@ class LaneFollowNode(DTROS):
             self.move_robust(speed=0 ,seconds=1)
             STOP_RED, STOP_BLUE = before_stop_red, before_stop_blue
 
-            print('out', 'STOP_RED', STOP_RED)
+            print('STOP_RED', STOP_RED)
+            print('STOP_BLUE', STOP_BLUE)
+
 
             # If a stop line is detected
             if STOP_RED:
                 turning_angle = TURN_VALUES[TURNS[turn]]
                 if turning_angle == 0:
-                    self.move_robust(speed=0.2 ,seconds=0.6)
+                    self.move_robust(speed=0 ,seconds=2)
+                    self.move_robust(speed=0.3 ,seconds=2)
                     # turn += 1
                     STOP_RED = False
+
                 else:
                     self.turn(1, turning_angle) # need to change r (will depend on which circle we are in)
                     turn += 1
@@ -316,12 +330,14 @@ class LaneFollowNode(DTROS):
             # If a number sign is detected
             elif STOP_BLUE:
                 # sleep? wait for number? Sergy? 
+                self.move_robust(speed=0 ,seconds=2)
+                self.lane_follow_n_sec(1.5)
                 STOP_BLUE = False
                 
 
     def move_robust(self, speed, seconds):
         rate = rospy.Rate(10)
-        print('speed', speed)
+        print('speed - robust: ', speed)
 
         self.twist.v = speed
         self.twist.omega = 0
@@ -332,9 +348,17 @@ class LaneFollowNode(DTROS):
             rate.sleep()
 
 
+    def lane_follow_n_sec(self, seconds):
+        rate = rospy.Rate(8)  # 8hz
+
+        for i in range(int(8*seconds)):
+            self.drive()
+            rate.sleep()
+
+
     def hook(self):
         print("SHUTTING DOWN")
-        self.move_robust(0)
+        self.move_robust(0, 1)
 
 
     def change_led_lights(self, dir: str):
