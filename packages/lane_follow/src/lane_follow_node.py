@@ -25,6 +25,7 @@ NUM_MASK = [(90, 85, 46), (175, 255, 255)]
 # Turn pattern 
 TURNS = ['S', 'S', 'L', 'R', 'S', 'R', 'L'] # starting at apriltag 3
 TURN_VALUES = {'S': 0, 'L': np.pi/2, 'R': -np.pi/2}
+TURNS_RADIUS = [0, 0, 0.3, 0.12, 0, 0.12, 0.3]
 STOP_RED = False
 STOP_BLUE = False
 
@@ -154,7 +155,7 @@ class LaneFollowNode(DTROS):
                 elif stopping:
                     # print('stoping cond cy: ', cy, cx)
                     if cx > 50:
-                        self.proportional_stopline = (cy/170)*0.14
+                        self.proportional_stopline = (cy/168)*0.12
                     else: 
                         self.proportional_stopline = None
 
@@ -166,10 +167,10 @@ class LaneFollowNode(DTROS):
 
                 # If checking for number condition or above the threshold, set STOP_BLUE
                 elif number and max_area < 2500:
-                    print('max_area', max_area)
+                    # print('max_area', max_area)
 
                     if max_area >= 2100:
-                        print('cy: ', cy, 'cx: ', cx)
+                        # print('cy: ', cy, 'cx: ', cx)
                         STOP_BLUE = True
 
                 else:
@@ -236,24 +237,33 @@ class LaneFollowNode(DTROS):
 
         # Calculate the target orientation 
         target_orientation = self.orientation + target_angle
-        orientation_error = target_orientation - self.orientation
+        orientation_error = np.sign(target_orientation - self.orientation)*(target_orientation - self.orientation) % 2*np.pi
 
         # Create a rospy.Rate object to maintain the loop rate at 8 Hz
         rate = rospy.Rate(8)
 
-        while abs(orientation_error) > 0.05:
-            print('orientation_error: ', orientation_error)
-            orientation_error = target_orientation - self.orientation
+        while abs(orientation_error) > 0.2:
+            print('orientation_error: ', np.rad2deg(orientation_error))
+            orientation_error = np.sign(target_orientation - self.orientation)*(target_orientation - self.orientation) % 2*np.pi
 
             # Calculate the angular speed using a simple controller
-            angular_speed = 0.296 * np.log(np.sign(orientation_error) * orientation_error + 0.06) +0.42
+            # angular_speed = 0.296 * np.log(np.sign(orientation_error) * orientation_error + 0.06) +0.42
+            if r == 0.3:
+                angular_speed = 3.2 * np.sign(orientation_error)
+                linear_speed = 0.3
+            else:
+                angular_speed = 4 * np.sign(orientation_error)
+                linear_speed = 0.32
+
 
             print('angular_speed', angular_speed)
 
+
             # Set the linear speed based on the angular speed and the desired radius
-            linear_speed = angular_speed / r
-            linear_speed = min(linear_speed, self.velocity)  # Limit the linear speed to the target speed
-            print('linear_speed', angular_speed)
+            # if r = angular_speed.3:
+            # linear_speed = abs(angular_speed / r)
+            # linear_speed = min(linear_speed, self.velocity)  # Limit the linear speed to the target speed
+            print('linear_speed', linear_speed)
 
             # Set the linear and angular speeds in the Twist message
             self.twist.v = linear_speed
@@ -296,7 +306,7 @@ class LaneFollowNode(DTROS):
         global STOP_RED, STOP_BLUE
         rate = rospy.Rate(8)  # 8hz
 
-        turn = 0
+        turn = 2
 
         while not rospy.is_shutdown():
             # Continue driving until a stop sign (red) or a number sign (blue) is detected
@@ -311,6 +321,7 @@ class LaneFollowNode(DTROS):
 
             print('STOP_RED', STOP_RED)
             print('STOP_BLUE', STOP_BLUE)
+            print(turn)
 
 
             # If a stop line is detected
@@ -319,11 +330,11 @@ class LaneFollowNode(DTROS):
                 if turning_angle == 0:
                     self.move_robust(speed=0 ,seconds=2)
                     self.move_robust(speed=0.3 ,seconds=2)
-                    # turn += 1
+                    turn += 1
                     STOP_RED = False
 
                 else:
-                    self.turn(1, turning_angle) # need to change r (will depend on which circle we are in)
+                    self.turn(TURNS_RADIUS[turn], turning_angle)
                     turn += 1
                     STOP_RED = False
 
@@ -331,7 +342,7 @@ class LaneFollowNode(DTROS):
             elif STOP_BLUE:
                 # sleep? wait for number? Sergy? 
                 self.move_robust(speed=0 ,seconds=2)
-                self.lane_follow_n_sec(1.5)
+                self.lane_follow_n_sec(2)
                 STOP_BLUE = False
                 
 
