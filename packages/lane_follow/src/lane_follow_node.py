@@ -236,14 +236,17 @@ class LaneFollowNode(DTROS):
 
         # Calculate the target orientation 
         target_orientation = self.orientation + target_angle
-        orientation_error = np.sign(target_orientation - self.orientation)*(target_orientation - self.orientation) % 2*np.pi
+        orientation_error_raw = target_orientation - self.orientation
+        orientation_error = np.sign(orientation_error_raw) * (abs(orientation_error_raw) % (2*np.pi))
 
         # Create a rospy.Rate object to maintain the loop rate at 8 Hz
         rate = rospy.Rate(8)
 
         while abs(orientation_error) > 0.2:
             print('orientation_error: ', np.rad2deg(orientation_error))
-            orientation_error = np.sign(target_orientation - self.orientation)*(target_orientation - self.orientation) % 2*np.pi
+
+            orientation_error_raw = target_orientation - self.orientation
+            orientation_error = np.sign(orientation_error_raw) * (abs(orientation_error_raw) % (2*np.pi))
 
             # Calculate the angular speed using a simple controller
             # angular_speed = 0.296 * np.log(np.sign(orientation_error) * orientation_error + 0.06) +0.42
@@ -254,14 +257,7 @@ class LaneFollowNode(DTROS):
                 angular_speed = 4 * np.sign(orientation_error)
                 linear_speed = 0.32
 
-
-            #print('angular_speed', angular_speed)
-
-            # Set the linear speed based on the angular speed and the desired radius
-            # if r = angular_speed.3:
-            # linear_speed = abs(angular_speed / r)
-            # linear_speed = min(linear_speed, self.velocity)  # Limit the linear speed to the target speed
-            print('linear_speed', linear_speed)
+            # print('linear_speed', linear_speed)
 
             # Set the linear and angular speeds in the Twist message
             self.twist.v = linear_speed
@@ -304,9 +300,11 @@ class LaneFollowNode(DTROS):
         global STOP_RED, STOP_BLUE
         rate = rospy.Rate(8)  # 8hz
 
-        turn = 2
+        turn = 0
 
         while not rospy.is_shutdown():
+            turn = turn % len(TURNS)
+            
             # Continue driving until a stop sign (red) or a number sign (blue) is detected
             while not STOP_RED and not STOP_BLUE:
                 self.drive()
@@ -314,20 +312,18 @@ class LaneFollowNode(DTROS):
 
             # Stop the Duckiebot once a sign is detected
             before_stop_red, before_stop_blue = STOP_RED, STOP_BLUE
-            self.move_robust(speed=0 ,seconds=1)
+            self.move_robust(speed=0 ,seconds=2)
             STOP_RED, STOP_BLUE = before_stop_red, before_stop_blue
 
             print('STOP_RED', STOP_RED)
             print('STOP_BLUE', STOP_BLUE)
-            print(turn)
-
+            print(TURNS[turn])
 
             # If a stop line is detected
             if STOP_RED:
                 turning_angle = TURN_VALUES[TURNS[turn]]
                 if turning_angle == 0:
-                    self.move_robust(speed=0 ,seconds=2)
-                    self.move_robust(speed=0.3 ,seconds=2)
+                    self.move_robust(speed=0.3 ,seconds=2.5)
                     turn += 1
                     STOP_RED = False
 
