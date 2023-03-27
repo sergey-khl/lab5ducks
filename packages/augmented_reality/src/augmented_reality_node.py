@@ -34,11 +34,20 @@ class AugmentedRealityNode(DTROS):
                        refine_edges=1,
                        decode_sharpening=0.25,
                        debug=0)
+                       
+        self.tags = {
+        "153": {"x": 1.75, "y": 1.252, "z": 0.075, "yaw": 0, "pitch": 0, "roll": 4.7124},
+        "201": {"x": 1.65, "y": 0.17, "z": 0.075, "yaw": 3.92699, "pitch": 0, "roll": 4.7124},
+        "200": {"x": 0.17, "y": 0.17, "z": 0.075, "yaw": 2.3562, "pitch": 0, "roll": 4.7124},
+        "162": {"x": 1.253, "y": 1.253, "z": 0.075, "yaw": 4.7124, "pitch": 0, "roll": 4.7124},
+        "58": {"x": 0.574, "y": 1.259, "z": 0.075, "yaw": 4.7124, "pitch": 0, "roll": 4.7124},
+        "133": {"x": 1.253, "y": 1.755, "z": 0.075, "yaw": 3.14159265, "pitch": 0, "roll": 4.7124},
+        "169": {"x": 0.574, "y": 1.755, "z": 0.075, "yaw": 1.5708, "pitch": 0, "roll": 4.7124},
+        "62": {"x": 0.075, "y": 1.755, "z": 0.075, "yaw": 3.141592, "pitch": 0, "roll": 4.7124},
+        "94": {"x": 1.65, "y": 2.84, "z": 0.075, "yaw": 5.49779, "pitch": 0, "roll": 4.7124},
+        "93": {"x": 0.17, "y": 2.84, "z": 0.075, "yaw": 0.7854, "pitch": 0, "roll": 4.7124},
+        }
 
-
-        # setup publisher
-        # Initialize TurboJPEG decoder
-        self.jpeg = TurboJPEG()
         # Initialize TurboJPEG decoder
         self.jpeg = TurboJPEG()
         self.undistorted = None
@@ -54,27 +63,17 @@ class AugmentedRealityNode(DTROS):
 
         self.new_cam_matrix, self.roi = cv2.getOptimalNewCameraMatrix(self.cam_matrix, self.distort_coeff, (self.img_width, self.img_height), 1, (self.img_width, self.img_height))
 
-        # construct publisher
-        self.pub_loc = rospy.Publisher(f'/{self.veh}/teleport', Pose, queue_size=1)
-
         # Services
         self.srv_get_april = rospy.Service(
             "~get_april_detect", img, self.srvGetApril
         )
 
 
-        self._tf_broadcaster = TransformBroadcaster()
-        self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer)
-
-        self.wizard(Point(*[0.32, 0.3, 0]), Quaternion(*[0, 0, 0, 1]))
 
     def srvGetApril(self, req):
         undistorted = self.jpeg.decode(req.img.data)
         self.undistorted = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
         resized_image = cv2.resize(self.undistorted, (28, 28))
-        if not cv2.imwrite(f'/data/test/{rospy.Time.now().secs}.jpg', resized_image):
-            raise Exception("Could not write image")
 
         detected = self.detect_april()
 
@@ -88,101 +87,15 @@ class AugmentedRealityNode(DTROS):
         
         results = self.detector.detect(self.undistorted, estimate_tag_pose=True, camera_params=(self.cam_matrix[0,0], self.cam_matrix[1,1], self.cam_matrix[0,2], self.cam_matrix[1,2]), tag_size=0.065)
 
-        # for r in results:
-        # extract the bounding box (x, y)-coordinates for the AprilTag
-        # and convert each of the (x, y)-coordinate pairs to integers
         try:
             r = results[0]
-            (ptA, ptB, ptC, ptD) = r.corners
-            ptB = (int(ptB[0]), int(ptB[1]))
-            ptC = (int(ptC[0]), int(ptC[1]))
-            ptD = (int(ptD[0]), int(ptD[1]))
-            ptA = (int(ptA[0]), int(ptA[1]))
-            # draw the bounding box of the AprilTag detection
-            cv2.line(self.undistorted, ptA, ptB, (0, 255, 0), 2)
-            cv2.line(self.undistorted, ptB, ptC, (0, 255, 0), 2)
-            cv2.line(self.undistorted, ptC, ptD, (0, 255, 0), 2)
-            cv2.line(self.undistorted, ptD, ptA, (0, 255, 0), 2)
-            
-            # draw the tag id on the image center
-            (cX, cY) = (int(r.center[0]), int(r.center[1]))
-            tagID = str(r.tag_id)
-            cv2.putText(self.undistorted, tagID, (cX - 15, cY),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            t = tr.translation_from_matrix(tr.translation_matrix(np.array(r.pose_t).reshape(3)))
 
-            q = np.append(r.pose_R, [[0],[0],[0]], axis =1)
-            q = np.append(q, [[0,0,0, 1]], axis =0)
-            q = tr.quaternion_from_matrix(q)
+            self.log(f"\napriltag ID: {r.tag_id}, \nlocation: {self.tags[str(r.tag_id)]['x']}, {self.tags[str(r.tag_id)]['y']}, {self.tags[str(r.tag_id)]['z']}, \nrotation: {self.tags[str(r.tag_id)]['yaw']}, {self.tags[str(r.tag_id)]['pitch']}, {self.tags[str(r.tag_id)]['roll']}\n")
 
-            # send predicted april tag position
-            odom = Odometry()
-            odom.header.stamp = rospy.Time.now()  # Ideally, should be encoder time
-            odom.header.frame_id = f"{self.veh}/camera_optical_frame"
-
-            self._tf_broadcaster.sendTransform(
-                TransformStamped(
-                    header=odom.header,
-                    child_frame_id=f"{self.veh}/at_{r.tag_id}_estimate",
-                    transform=Transform(
-                        translation=Vector3(*t), rotation=Quaternion(*q)
-                    ),
-                )
-            )
-
-
-            trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/at_{r.tag_id}_estimate", rospy.Time())
-
-            self.log(f"apriltag ID: {r.tag_id}, \nlocation: {trans.transform.translation.x}, {trans.transform.translation.y}, {0.5}")
-
-            #new_img = CompressedImage()
-            #new_img.data = cv2.imencode('.jpg', self.undistorted)[1].tobytes()
-            #self.pub_img.publish(new_img)
-
-            # if (r.tag_id == 93 or r.tag_id == 94 or r.tag_id == 200 or r.tag_id == 201):
-            #     self.log('UOFA')
-            #     self.change_led_lights("green")
-            # elif (r.tag_id == 62 or r.tag_id == 153 or r.tag_id == 133 or r.tag_id == 56):
-            #     self.log('INTERSECTION')
-            #     self.change_led_lights("blue")
-            # elif (r.tag_id == 162 or r.tag_id == 169):
-            #     self.log('STOP')
-            #     self.change_led_lights("red")
-            
-
-
-            # may not need
-
-            # find transform from april tag to wheelbase in worldframe
-            # https://github.com/ros/geometry2/blob/noetic-devel/tf2_ros/src/tf2_ros/buffer.py
-
-
-
-            # might need -----
-            # trans = self._tf_buffer.lookup_transform_full(f"{self.veh}/at_{r.tag_id}_estimate", rospy.Time(), f"{self.veh}/base", rospy.Time(), f"{self.veh}/world")
-            
-            # # teleport
-            # odom = Odometry()
-            # odom.header.stamp = rospy.Time.now()  # Ideally, should be encoder time
-            # odom.header.frame_id = f"{self.veh}/at_{r.tag_id}_static"
-
-            # self._tf_broadcaster.sendTransform(TransformStamped(
-            #         header=odom.header,
-            #         child_frame_id=f"{self.veh}/robo_estimate",
-            #         transform=trans.transform,
-            #     )
-            # )
-
-
-            # trans = self._tf_buffer.lookup_transform(f"{self.veh}/world", f"{self.veh}/robo_estimate", rospy.Time())
-
-            
-
-            # self.wizard(Point(*[trans.transform.translation.x, trans.transform.translation.y, 0]), trans.transform.rotation)
             return 1
         except Exception as e:
             print(e)
-            #self.change_led_lights("white")
+
             return 0
         
     def readYamlFile(self,fname):
@@ -201,9 +114,6 @@ class AugmentedRealityNode(DTROS):
                 rospy.signal_shutdown()
                 return
 
-    def wizard(self, tran, rot):
-        pose = Pose(tran, rot)
-        self.pub_loc.publish(pose)
 
 if __name__ == '__main__':
     # create the node

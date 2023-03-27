@@ -7,7 +7,7 @@ import yaml
 
 from duckietown.dtros import DTROS, NodeType
 from sensor_msgs.msg import CameraInfo, CompressedImage
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, String, Bool
 from turbojpeg import TurboJPEG
 
 from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped
@@ -47,7 +47,12 @@ class LaneFollowNode(DTROS):
                                     CompressedImage,
                                     self.callback,
                                     queue_size=1,
-                                    buff_size="20MB")        
+                                    buff_size="20MB")
+                                    
+        self.sub_done = rospy.Subscriber("/" + self.veh + "/done",
+                                    Bool,
+                                    self.cb_done,
+                                    queue_size=1)   
 
         # Initialize distance subscriber and velocity publisher
         #self.sub_ml = rospy.Subscriber("/" + self.veh + "/augmented_reality_node/position", Point, self.cb_april, queue_size=1)
@@ -84,21 +89,15 @@ class LaneFollowNode(DTROS):
         self.subscriber = rospy.Subscriber(f'/{self.veh}/deadreckoning_node/odom', 
                                            Odometry, 
                                            self.odom_callback)
+                                           
+        self.subscriber = rospy.Subscriber(f'/{self.veh}/deadreckoning_node/odom', 
+                                           Odometry, 
+                                           self.odom_callback)
 
         # Initialize LED pattern change service
         led_service = f'/{self.veh}/led_controller_node/led_pattern'
         rospy.wait_for_service(led_service)
         self.led_pattern = rospy.ServiceProxy(led_service, ChangePattern)
-
-        # Initialize get april tag service
-        # april_service = f'/{self.veh}/augmented_reality_node/get_april_detect'
-        # rospy.wait_for_service(april_service)
-        # self.get_april = rospy.ServiceProxy(april_service, img)
-
-        # Initialize get digit service
-        #digit_service = f'/detect_digit_node/detect_digit'
-        #rospy.wait_for_service(digit_service)
-        #self.get_digit = rospy.ServiceProxy(digit_service, img)
 
         # Initialize shutdown hook
         rospy.on_shutdown(self.hook)
@@ -166,10 +165,10 @@ class LaneFollowNode(DTROS):
 
                 # If checking for number condition or above the threshold, set STOP_BLUE
                 elif number and max_area < 2500:
-                    print('max_area', max_area)
+                    #print('max_area', max_area)
 
                     if max_area >= 2100:
-                        print('cy: ', cy, 'cx: ', cx)
+                        #print('cy: ', cy, 'cx: ', cx)
                         STOP_BLUE = True
 
                 else:
@@ -242,18 +241,18 @@ class LaneFollowNode(DTROS):
         rate = rospy.Rate(8)
 
         while abs(orientation_error) > 0.05:
-            print('orientation_error: ', orientation_error)
+            #print('orientation_error: ', orientation_error)
             orientation_error = target_orientation - self.orientation
 
             # Calculate the angular speed using a simple controller
             angular_speed = 0.296 * np.log(np.sign(orientation_error) * orientation_error + 0.06) +0.42
 
-            print('angular_speed', angular_speed)
+            #print('angular_speed', angular_speed)
 
             # Set the linear speed based on the angular speed and the desired radius
             linear_speed = angular_speed / r
             linear_speed = min(linear_speed, self.velocity)  # Limit the linear speed to the target speed
-            print('linear_speed', angular_speed)
+            #print('linear_speed', angular_speed)
 
             # Set the linear and angular speeds in the Twist message
             self.twist.v = linear_speed
@@ -309,8 +308,8 @@ class LaneFollowNode(DTROS):
             self.move_robust(speed=0 ,seconds=1)
             STOP_RED, STOP_BLUE = before_stop_red, before_stop_blue
 
-            print('STOP_RED', STOP_RED)
-            print('STOP_BLUE', STOP_BLUE)
+            #print('STOP_RED', STOP_RED)
+            #print('STOP_BLUE', STOP_BLUE)
 
 
             # If a stop line is detected
@@ -337,7 +336,7 @@ class LaneFollowNode(DTROS):
 
     def move_robust(self, speed, seconds):
         rate = rospy.Rate(10)
-        print('speed - robust: ', speed)
+        #print('speed - robust: ', speed)
 
         self.twist.v = speed
         self.twist.omega = 0
@@ -355,10 +354,13 @@ class LaneFollowNode(DTROS):
             self.drive()
             rate.sleep()
 
+    def cb_done(self, done):
+        if done.data:
+            self.hook()
 
     def hook(self):
         print("SHUTTING DOWN")
-        self.move_robust(0, 1)
+        self.move_robust(0, 2)
 
 
     def change_led_lights(self, dir: str):

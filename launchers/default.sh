@@ -17,7 +17,7 @@ dt-exec roslaunch augmented_reality augmented_reality_node.launch veh:="$VEHICLE
 dt-exec roslaunch deadreckoning deadreckoning_node.launch veh:="$VEHICLE_NAME"
 dt-exec roslaunch lane_follow lane_follow_node.launch veh:="$VEHICLE_NAME"
 dt-exec roslaunch led_controller led_controller_node.launch veh:="$VEHICLE_NAME"
-# dt-exec roslaunch digit_virtuoso digit_virtuoso_node.launch veh:="$VEHICLE_NAME"
+dt-exec roslaunch digit_virtuoso digit_virtuoso_node.launch veh:="$VEHICLE_NAME"
 
 # ----------------------------------------------------------------------------
 # YOUR CODE ABOVE THIS LINE
