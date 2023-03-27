@@ -10,7 +10,7 @@ Going around duckietown and detecting numbers and apriltags until all are detect
     ```   
 2. Run it:
   * ```shell 
-    dts devel run -R MY_ROBOT
+    dts devel run -H MY_ROBOT.local
     ```   
 
 ## References 🫡
